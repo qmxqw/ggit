@@ -297,6 +297,13 @@ class ParseTest(unittest.TestCase):
         fd = gitcore.parse_diff(b"diff --git a/x b/x\nBinary files a/x and b/x differ\n")
         self.assertTrue(fd.is_binary)
 
+    def test_diff_truncation_protection(self):
+        # 超过行数截断保护
+        huge_data = b"@@ -1,1 +1,40000 @@\n" + b"+line\n" * 35000
+        fd = gitcore.parse_diff(huge_data)
+        self.assertTrue(any("已自动截断" in (l.text or "") for l in fd.lines))
+        self.assertLessEqual(len(fd.lines), gitcore.MAX_DIFF_PARSE_LINES + 2)
+
     def test_graph_linear_and_branches(self):
         lay = GraphLayout()
         r1 = lay.add("c", ["b"])

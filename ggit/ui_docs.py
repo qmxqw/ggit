@@ -27,6 +27,7 @@ class Doc:
     data: object = None
     token: int = 0                 # 每次加载 +1，用来丢弃过期的结果
     sig: object = None             # 上次显示内容的签名：自动刷新时内容没变就不重绘
+    task_id: Optional[int] = None  # 正在运行的后台任务 ID
 
 
 class DocTabBar(QTabBar):
@@ -146,14 +147,19 @@ class DocArea(QWidget):
         """在后台读取内容并显示。quiet=True（自动刷新）：不显示“加载中”，内容没变就不重绘，保持滚动位置。"""
         if doc.fn is None:
             return
+        if doc.task_id is not None:
+            self.runner.cancel(doc.task_id)
+            doc.task_id = None
         doc.token += 1
         tok, fn, opts = doc.token, doc.fn, self.options.copy()
         if not quiet:
             doc.sig = None
             doc.view.set_message("加载中…")
-        self.runner.submit(lambda: fn(opts),
-                           lambda res: self._on_loaded(doc, tok, res, quiet),
-                           lambda e: self._on_error(doc, tok, e))
+        doc.task_id = self.runner.submit(
+            lambda: fn(opts),
+            lambda res: self._on_loaded(doc, tok, res, quiet),
+            lambda e: self._on_error(doc, tok, e),
+        )
 
     def _alive(self, doc: Doc, tok: int) -> bool:
         return self._docs.get(doc.key) is doc and doc.token == tok
@@ -188,6 +194,9 @@ class DocArea(QWidget):
         doc = self._docs.pop(key, None)
         self.tabbar.removeTab(i)
         if doc is not None:
+            if doc.task_id is not None:
+                self.runner.cancel(doc.task_id)
+                doc.task_id = None
             doc.token += 1
             self.stack.removeWidget(doc.view)
             doc.view.deleteLater()

@@ -16,6 +16,10 @@ def config_path() -> str:
     return os.path.join(base, "ggit", "config.json")
 
 
+def crash_log_path() -> str:
+    return os.path.join(os.path.dirname(config_path()), "crash.log")
+
+
 def load() -> dict:
     try:
         with open(config_path(), "r", encoding="utf-8") as f:

@@ -31,6 +31,8 @@ SCOPE_ALL = "all"    # 所有本地分支、远端分支、标签
 LOG_PAGE = 500
 FULL_CONTEXT = 1_000_000   # diff 一律取整个文件的上下文，界面再按需裁剪成“只看改动处”
 MAX_UNTRACKED_BYTES = 5 * 1024 * 1024
+MAX_DIFF_BYTES = 10 * 1024 * 1024
+MAX_DIFF_PARSE_LINES = 30000
 
 
 class GitError(Exception):
@@ -83,6 +85,11 @@ def decode_line(raw: bytes, encoding: str = ENC_AUTO) -> str:
 
 
 def run_git(repo: str, args: list[str], *, check: bool = True, timeout: int = 120) -> bytes:
+    from .async_runner import GitCancelledError, get_current_cancel_token
+    cancel_token = get_current_cancel_token()
+    if cancel_token and cancel_token.cancelled:
+        raise GitCancelledError("操作已取消")
+
     exe = find_git()
     if not exe:
         raise GitError("未找到 git。请先安装 Git，并确保 git 在 PATH 中。")
@@ -92,19 +99,35 @@ def run_git(repo: str, args: list[str], *, check: bool = True, timeout: int = 12
     env["GIT_OPTIONAL_LOCKS"] = "0"      # 只读：status 不去更新索引、不抢锁
     env["GIT_TERMINAL_PROMPT"] = "0"
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd, cwd=repo, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            creationflags=_NO_WINDOW, env=env, timeout=timeout,
+            creationflags=_NO_WINDOW, env=env,
         )
+        if cancel_token:
+            cancel_token.set_proc(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        finally:
+            if cancel_token:
+                cancel_token.set_proc(None)
     except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.communicate()
+        except OSError:
+            pass
         raise GitError(f"git {args[0]} 超时（超过 {timeout} 秒）")
     except OSError as e:
         raise GitError(f"无法运行 git：{e}")
+
+    if cancel_token and cancel_token.cancelled:
+        raise GitCancelledError("操作已取消")
+
     if check and proc.returncode != 0:
-        msg = decode_line(proc.stderr).strip() or f"git {args[0]} 失败（返回码 {proc.returncode}）"
+        msg = decode_line(stderr).strip() or f"git {args[0]} 失败（返回码 {proc.returncode}）"
         raise GitError(msg)
-    return proc.stdout
+    return stdout
 
 
 def toplevel(path: str) -> str:
@@ -515,6 +538,12 @@ def _diff_flags(ignore_ws: bool, ignore_eol: bool, context: int) -> list:
 def parse_diff(data: bytes, encoding: str = ENC_AUTO) -> FileDiff:
     """解析统一 diff。行只分 ctx / add / del（不区分“修改行”）。"""
     fd = FileDiff()
+    truncated = False
+    if len(data) > MAX_DIFF_BYTES:
+        pos = data.rfind(b"\n", 0, MAX_DIFF_BYTES)
+        data = data[:pos] if pos != -1 else data[:MAX_DIFF_BYTES]
+        truncated = True
+
     raw_lines = data.split(b"\n")
     if raw_lines and raw_lines[-1] == b"":
         raw_lines.pop()
@@ -523,6 +552,9 @@ def parse_diff(data: bytes, encoding: str = ENC_AUTO) -> FileDiff:
     old_no = new_no = 0
     sections = 0
     for raw in raw_lines:
+        if len(fd.lines) >= MAX_DIFF_PARSE_LINES:
+            truncated = True
+            break
         if raw.endswith(b"\r"):
             raw = raw[:-1]
         if raw.startswith((b"diff --git ", b"diff --cc ", b"diff --combined ")):
@@ -586,6 +618,8 @@ def parse_diff(data: bytes, encoding: str = ENC_AUTO) -> FileDiff:
             fd.lines.append(DiffLine("ctx", old_no, new_no, text))
             old_no += 1
             new_no += 1
+    if truncated:
+        fd.lines.append(DiffLine("hunk", None, None, "@@ 差异内容过大，已自动截断 @@"))
     return fd
 
 

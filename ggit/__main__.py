@@ -16,11 +16,48 @@ def _set_app_id() -> None:
             pass
 
 
+def _install_excepthook() -> None:
+    """未捕获异常时记录日志并弹出提示，避免静默闪退。"""
+    def _hook(exc_type, exc_value, exc_tb):
+        import os
+        import traceback
+        from datetime import datetime
+        from . import config
+
+        log_file = config.crash_log_path()
+        try:
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*25} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {'='*25}\n")
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+        except Exception:
+            pass
+
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+            if QApplication.instance():
+                lines = traceback.format_exception(exc_type, exc_value, exc_tb)
+                detail = "".join(lines)
+                if len(detail) > 1000:
+                    detail = detail[:1000] + "\n..."
+                QMessageBox.critical(
+                    None, "ggit 运行异常",
+                    f"程序发生未捕获的异常：\n{exc_type.__name__}: {exc_value}\n\n"
+                    f"详细日志已保存至：\n{log_file}\n\n{detail}"
+                )
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _hook
+
+
 def main() -> int:
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     _set_app_id()
+    _install_excepthook()
     app = QApplication(sys.argv)
     app.setApplicationName("ggit")
 

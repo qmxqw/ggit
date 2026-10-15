@@ -125,6 +125,9 @@ class ProjectView(QWidget):
         self._work_mode = "git"
         self.file_panel = None          # file 模式的文件树（第一次进入 file 模式时才创建）
         self.file_docs = None           # file 模式的文档标签页
+        self._snap_task = None
+        self._graph_task = None
+        self._hist_task = None
         self._build_ui()
 
     # ================================================================== 界面
@@ -264,12 +267,17 @@ class ProjectView(QWidget):
         self._last_refresh = now
         if self.file_docs is not None:
             self.file_docs.reload_all()         # 别的程序改了文件，这里的预览跟着更新
+        if self._snap_task is not None:
+            self.runner.cancel(self._snap_task)
+            self._snap_task = None
         self._gen += 1
         gen = self._gen
         path = self.path
-        self.runner.submit(lambda: gitcore.get_snapshot(path),
-                           lambda s: self._on_snapshot(gen, s, force),
-                           lambda e: self._on_error(gen, e))
+        self._snap_task = self.runner.submit(
+            lambda: gitcore.get_snapshot(path),
+            lambda s: self._on_snapshot(gen, s, force),
+            lambda e: self._on_error(gen, e),
+        )
 
     def _on_error(self, gen, err):
         if not self._alive or gen != self._gen:
@@ -465,24 +473,34 @@ class ProjectView(QWidget):
         snap = self.snap
         if snap is None:
             return
+        if self._graph_task is not None:
+            self.runner.cancel(self._graph_task)
+            self._graph_task = None
         self._graph_gen += 1
         gen = self._graph_gen
         self._log_loading = True
         path, scope = self.path, self._scope
-        self.runner.submit(lambda: gitcore.get_log(path, snap, scope, 0, PAGE),
-                           lambda r: self._on_log(gen, r, True),
-                           lambda e: self._on_log_error(gen, e))
+        self._graph_task = self.runner.submit(
+            lambda: gitcore.get_log(path, snap, scope, 0, PAGE),
+            lambda r: self._on_log(gen, r, True),
+            lambda e: self._on_log_error(gen, e),
+        )
 
     def _load_more(self):
         if self._log_loading or self.snap is None or not self.model.more:
             return
+        if self._graph_task is not None:
+            self.runner.cancel(self._graph_task)
+            self._graph_task = None
         self._log_loading = True
         gen = self._graph_gen
         snap, path, scope = self.snap, self.path, self._scope
         skip = len([1 for it in self.model.list.items if isinstance(it, Row)])   # 已加载的提交数（不含文件行）
-        self.runner.submit(lambda: gitcore.get_log(path, snap, scope, skip, PAGE),
-                           lambda r: self._on_log(gen, r, False),
-                           lambda e: self._on_log_error(gen, e))
+        self._graph_task = self.runner.submit(
+            lambda: gitcore.get_log(path, snap, scope, skip, PAGE),
+            lambda r: self._on_log(gen, r, False),
+            lambda e: self._on_log_error(gen, e),
+        )
 
     def _on_log(self, gen, commits, reset):
         if not self._alive or gen != self._graph_gen:
@@ -695,6 +713,9 @@ class ProjectView(QWidget):
 
     def _load_history(self, path: str, quiet: bool):
         reselect = self._src[1] if (quiet and self._src and self._src[0] == "hist") else None
+        if self._hist_task is not None:
+            self.runner.cancel(self._hist_task)
+            self._hist_task = None
         self._hist_gen += 1
         gen = self._hist_gen
         self.hist_title.setText(f"文件历史：{path}")
@@ -704,9 +725,11 @@ class ProjectView(QWidget):
             self.hist_list.addItem("加载中…")
             self.hist_list.blockSignals(False)
         repo = self.path
-        self.runner.submit(lambda: gitcore.get_file_history(repo, path),
-                           lambda es: self._on_history(gen, es, reselect),
-                           lambda e: self._on_history_error(gen, e))
+        self._hist_task = self.runner.submit(
+            lambda: gitcore.get_file_history(repo, path),
+            lambda es: self._on_history(gen, es, reselect),
+            lambda e: self._on_history_error(gen, e),
+        )
 
     def _on_history(self, gen, entries, reselect):
         if not self._alive or gen != self._hist_gen:
@@ -755,6 +778,9 @@ class ProjectView(QWidget):
         self._hist_entry_doc(e)
 
     def close_history(self):
+        if self._hist_task is not None:
+            self.runner.cancel(self._hist_task)
+            self._hist_task = None
         self.left_stack.setCurrentIndex(0)
         self._hist_path = None
 
