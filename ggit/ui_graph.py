@@ -150,7 +150,9 @@ class CommitModel(QAbstractListModel):
 
 class CommitDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
-        return QSize(0, ROW_H)
+        fm = option.fontMetrics
+        h = max(24, fm.height() + 8)
+        return QSize(0, h)
 
     def paint(self, painter, option, index):
         item = index.data(Qt.ItemDataRole.UserRole)

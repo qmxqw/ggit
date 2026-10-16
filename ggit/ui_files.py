@@ -94,6 +94,18 @@ class FileDocument(QWidget):
     def set_mode(self, mode: str) -> None:
         pass
 
+    def apply_font_size(self, size: int) -> None:
+        import sys
+        from PySide6.QtGui import QFont, QFontDatabase
+        code_pt = max(8, size + 1)
+        family = "Consolas" if sys.platform == "win32" else QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
+        font = QFont(family, code_pt)
+        self.view.setFont(font)
+        self.view.setTabStopDistance(self.view.fontMetrics().horizontalAdvance(" ") * 4)
+        self.view._update_margin()
+        if self._fc is not None:
+            self._render(True)
+
     def goto_change(self, forward: bool = True) -> None:
         pass
 

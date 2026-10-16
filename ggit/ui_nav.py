@@ -1,13 +1,15 @@
-"""顶部项目导航：每个项目一个 200 宽、两行高的大标签。
+"""顶部项目导航：每个项目一个 200 宽的大标签。
 
-第一行：热键序号 + 项目名；第二行：分支、是否有未提交改动（●）、领先/落后远端（↑ ↓）。
+单行大字居中排版：热键序号 + 项目名（字体增加 100%）。
 放不下时可以用鼠标滚轮横向滚动（也可用 Ctrl+1…0 / Ctrl+P / “全部项目”菜单切换）。
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter
-from PySide6.QtWidgets import QAbstractButton, QHBoxLayout, QScrollArea, QWidget
+from typing import Optional
+
+from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QPainter
+from PySide6.QtWidgets import QAbstractButton, QHBoxLayout, QScrollArea, QToolTip, QWidget
 
 
 class ProjectButton(QAbstractButton):
@@ -28,6 +30,10 @@ class ProjectButton(QAbstractButton):
         self.behind = 0
         self.error = False
         self.loaded = False
+        self.tip = ""
+        self._drag_start_pos = None
+        self._is_dragging = False
+        self._drag_start_idx = -1
 
     def sizeHint(self):
         return QSize(self.W, self.H)
@@ -36,78 +42,152 @@ class ProjectButton(QAbstractButton):
         self.key, self.name, self.branch = key, name, branch
         self.dirty, self.ahead, self.behind = dirty, ahead, behind
         self.error, self.loaded = error, loaded
-        self.setToolTip(tip)
+        self.tip = tip
+        self.setToolTip("")
         self.update()
+
+    def _nav(self) -> Optional[ProjectNav]:
+        if hasattr(self, "nav") and self.nav is not None:
+            return self.nav
+        w = self.parentWidget()
+        while w is not None:
+            if isinstance(w, ProjectNav):
+                return w
+            w = w.parentWidget()
+        return None
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        nav = self._nav()
+        if nav is not None:
+            nav._on_button_enter(self)
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        nav = self._nav()
+        if nav is not None:
+            nav._on_button_leave(self)
+
+    def mousePressEvent(self, event):
+        nav = self._nav()
+        if nav is not None:
+            nav._hide_tip_now()
+        if event.button() == Qt.MouseButton.LeftButton:
+            # 细节：只允许拖动当前打开的项目；未打开项目点击只触发切换
+            if not self.isChecked():
+                self._drag_start_pos = None
+                self._is_dragging = False
+                super().mousePressEvent(event)
+                return
+            self._drag_start_pos = event.position().toPoint()
+            self._is_dragging = False
+            nav = self._nav()
+            self._drag_start_idx = nav.button_index(self) if nav else -1
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self.isChecked() or self._drag_start_pos is None:
+            super().mouseMoveEvent(event)
+            return
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+            if not self._is_dragging and dist >= 8:
+                self._is_dragging = True
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                self.update()
+            if self._is_dragging:
+                nav = self._nav()
+                if nav is not None and getattr(nav, "_box", None) is not None:
+                    # 使用全局坐标映射到 _box，绝对稳定且不受 widget 自身换位的影响
+                    box_x = nav._box.mapFromGlobal(event.globalPosition().toPoint()).x()
+                    nav._handle_drag_move(self, box_x)
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._is_dragging:
+            self._is_dragging = False
+            self._drag_start_pos = None
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setDown(False)
+            self.update()
+            nav = self._nav()
+            if nav is not None:
+                nav._handle_drag_release(self, self._drag_start_idx)
+            return
+        self._drag_start_pos = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         r = self.rect()
         checked, hover = self.isChecked(), self.underMouse()
-        p.fillRect(r, QColor("#1e1e1e") if checked else QColor("#3a3a40") if hover else QColor("#2d2d30"))
-        p.setPen(QColor("#3c3c3c"))
+        bg_col = QColor("#333338") if self._is_dragging else (QColor("#1e1e1e") if checked else QColor("#3a3a40") if hover else QColor("#2d2d30"))
+        p.fillRect(r, bg_col)
+        p.setPen(QColor("#0e7ad1") if self._is_dragging else QColor("#3c3c3c"))
         p.drawRect(r.adjusted(0, 0, -1, -1))
-        if checked:
+        if checked or self._is_dragging:
             p.fillRect(0, 0, r.width(), 3, QColor("#0e7ad1"))
 
         base = self.font()
+        base_size = base.pointSizeF() if base.pointSizeF() > 0 else float(base.pointSize())
+        # 项目标题字号：适度放大（比常规字体大约 30%），确保上下与左右有舒适安全边距
+        title_size = max(10.5, min(14.0, base_size * 1.3))
         f1 = QFont(base)
         f1.setBold(True)
-        if base.pointSizeF() > 0:
-            f1.setPointSizeF(base.pointSizeF() + 1.0)
-        f2 = QFont(base)
-        if base.pointSizeF() > 0:
-            f2.setPointSizeF(max(7.0, base.pointSizeF() - 0.5))
+        f1.setPointSizeF(title_size)
 
-        # ---- 第一行：热键徽标 + 项目名 ----
+        # ---- 单行排版：精致热键徽标 + 大字项目名（去掉第 2 行分支信息）----
         p.setFont(f1)
         fm1 = p.fontMetrics()
-        y1 = 8 + fm1.ascent()
-        bw = 18
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#0e7ad1") if checked else QColor("#4a4a50"))
-        p.drawRoundedRect(QRectF(10, 8, bw, fm1.height()), 3, 3)
-        p.setPen(QColor("#ffffff"))
-        p.drawText(QPointF(10 + (bw - fm1.horizontalAdvance(self.key)) / 2, y1), self.key)
-        name_x = 10 + bw + 8
-        p.setPen(QColor("#ffffff") if checked else QColor("#d4d4d4"))
-        name = fm1.elidedText(self.name, Qt.TextElideMode.ElideRight, self.W - name_x - 10)
-        p.drawText(QPointF(name_x, y1), name)
+        th = fm1.height()
+        y1 = int((self.H - th) / 2 + fm1.ascent())
 
-        # ---- 第二行：分支 + 状态标记 ----
-        p.setFont(f2)
-        fm2 = p.fontMetrics()
-        y2 = self.H - 8 - fm2.descent()
-        x = 10.0
-        if self.error:
-            p.setPen(QColor("#f14c4c"))
-            p.drawText(QPointF(x, y2), "无法读取这个项目")
-        elif not self.loaded:
-            p.setPen(QColor("#808080"))
-            p.drawText(QPointF(x, y2), "加载中…")
+        pad_left = 14
+        if self.key:
+            k_font = QFont(base)
+            k_font.setBold(True)
+            k_font.setPointSizeF(max(8.0, min(10.0, base_size * 0.95)))
+            p.setFont(k_font)
+            kfm = p.fontMetrics()
+            bw = max(20, kfm.horizontalAdvance(self.key) + 8)
+            bh = 20
+            by = int((self.H - bh) / 2)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#0e7ad1") if checked else QColor("#4a4a50"))
+            p.drawRoundedRect(QRectF(pad_left, by, bw, bh), 4, 4)
+            p.setPen(QColor("#ffffff"))
+            ky = by + int((bh - kfm.height()) / 2 + kfm.ascent())
+            p.drawText(QPointF(pad_left + (bw - kfm.horizontalAdvance(self.key)) / 2, ky), self.key)
+            name_x = pad_left + bw + 10
         else:
-            runs = []
-            if self.dirty:
-                runs.append(("●", QColor("#e2c08d")))
-            if self.ahead:
-                runs.append((f"↑{self.ahead}", QColor("#73c991")))
-            if self.behind:
-                runs.append((f"↓{self.behind}", QColor("#ff9e64")))
-            tail_w = sum(fm2.horizontalAdvance(t) + 8 for t, _ in runs)
-            branch = fm2.elidedText("⎇ " + self.branch, Qt.TextElideMode.ElideRight,
-                                    max(20, int(self.W - 20 - tail_w)))
-            p.setPen(QColor("#a0a0a0"))
-            p.drawText(QPointF(x, y2), branch)
-            x += fm2.horizontalAdvance(branch) + 8
-            for text, color in runs:
-                p.setPen(color)
-                p.drawText(QPointF(x, y2), text)
-                x += fm2.horizontalAdvance(text) + 8
+            name_x = pad_left
+
+        right_margin = 16
+        if self.dirty:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#e2c08d"))
+            p.drawEllipse(QPointF(self.W - 14, self.H / 2.0), 3.5, 3.5)
+            right_margin = 26
+        elif self.error:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#f14c4c"))
+            p.drawEllipse(QPointF(self.W - 14, self.H / 2.0), 3.5, 3.5)
+            right_margin = 26
+
+        p.setFont(f1)
+        p.setPen(QColor("#ffffff") if checked else QColor("#d4d4d4"))
+        avail_w = max(20, int(self.W - name_x - right_margin))
+        name = fm1.elidedText(self.name, Qt.TextElideMode.ElideRight, avail_w)
+        p.drawText(QPointF(name_x, y1), name)
         p.end()
 
 
 class ProjectNav(QScrollArea):
     selected = Signal(int)
+    reordered = Signal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -128,15 +208,106 @@ class ProjectNav(QScrollArea):
             w.setPalette(pal)
         self._buttons: list = []
 
+        # 毫秒级 Tooltip 调度器：180ms 快速唤起，防抖微动必定触发，平移项目无缝秒切
+        self._tip_timer = QTimer(self)
+        self._tip_timer.setSingleShot(True)
+        self._tip_timer.timeout.connect(self._on_tip_timeout)
+
+        self._tip_leave_timer = QTimer(self)
+        self._tip_leave_timer.setSingleShot(True)
+        self._tip_leave_timer.timeout.connect(self._on_tip_leave_timeout)
+
+        self._hovered_btn: Optional[ProjectButton] = None
+        self._active_tip_btn: Optional[ProjectButton] = None
+
+    def _on_button_enter(self, btn: ProjectButton) -> None:
+        if self._tip_leave_timer.isActive():
+            self._tip_leave_timer.stop()
+        self._hovered_btn = btn
+        if not getattr(btn, "tip", None):
+            return
+        if self._active_tip_btn is not None:
+            # 已经在浏览 ToolTip：鼠标在项目间平移时 0ms 瞬间切换显示，无等待感
+            self._show_tip(btn)
+        else:
+            # 首次悬停：180ms 快速响应（原系统默认 ~700ms 且鼠标微动会被压制）
+            self._tip_timer.start(180)
+
+    def _on_button_leave(self, btn: ProjectButton) -> None:
+        if self._hovered_btn == btn:
+            self._hovered_btn = None
+            if self._tip_timer.isActive():
+                self._tip_timer.stop()
+            self._tip_leave_timer.start(80)
+
+    def _on_tip_timeout(self) -> None:
+        if self._hovered_btn is not None and getattr(self._hovered_btn, "tip", None):
+            self._show_tip(self._hovered_btn)
+
+    def _on_tip_leave_timeout(self) -> None:
+        if self._hovered_btn is None:
+            self._hide_tip_now()
+
+    def _show_tip(self, btn: ProjectButton) -> None:
+        if not getattr(btn, "tip", None):
+            return
+        # 弹出的信息框与项目标题本身左对齐，并精准紧贴底边：
+        # 补偿 Qt 的 QToolTip 内部默认附加的 (+2px X, +16px Y) 光标避让偏移
+        top_left = btn.mapToGlobal(QPoint(0, 0))
+        btn_bottom_y = top_left.y() + btn.height()
+        pos = QPoint(top_left.x() - 2, btn_bottom_y - 15)
+        QToolTip.showText(pos, btn.tip)
+        self._active_tip_btn = btn
+
+    def _hide_tip_now(self) -> None:
+        if self._tip_timer.isActive():
+            self._tip_timer.stop()
+        if self._tip_leave_timer.isActive():
+            self._tip_leave_timer.stop()
+        self._active_tip_btn = None
+        QToolTip.hideText()
+
+    def button_index(self, btn: ProjectButton) -> int:
+        return self._buttons.index(btn) if btn in self._buttons else -1
+
+    def _on_btn_clicked(self, btn: ProjectButton) -> None:
+        idx = self.button_index(btn)
+        if idx >= 0:
+            self.selected.emit(idx)
+
+    def _handle_drag_move(self, btn: ProjectButton, box_x: int) -> None:
+        self._hide_tip_now()
+        cur_idx = self.button_index(btn)
+        if cur_idx < 0:
+            return
+        n = len(self._buttons)
+        if n <= 1:
+            return
+        pitch = ProjectButton.W + 2
+        margin_left = 4
+        target_idx = int((box_x - margin_left) // pitch)
+        target_idx = max(0, min(n - 1, target_idx))
+        if target_idx != cur_idx:
+            self._buttons.remove(btn)
+            self._buttons.insert(target_idx, btn)
+            self._lay.removeWidget(btn)
+            self._lay.insertWidget(target_idx, btn)
+            self.ensureWidgetVisible(btn, 20, 0)
+
+    def _handle_drag_release(self, btn: ProjectButton, start_idx: int) -> None:
+        cur_idx = self.button_index(btn)
+        if cur_idx >= 0 and cur_idx != start_idx:
+            self.reordered.emit(start_idx, cur_idx)
+
     def rebuild(self, count: int) -> None:
         while len(self._buttons) > count:
             b = self._buttons.pop()
             self._lay.removeWidget(b)
             b.deleteLater()
         while len(self._buttons) < count:
-            i = len(self._buttons)
             b = ProjectButton(self._box)
-            b.clicked.connect(lambda _=False, i=i: self.selected.emit(i))
+            b.nav = self
+            b.clicked.connect(lambda _=False, btn=b: self._on_btn_clicked(btn))
             self._lay.addWidget(b)
             self._buttons.append(b)
         self._box.setFixedSize(max(1, 8 + count * (ProjectButton.W + 2)), ProjectButton.H + 6)
@@ -152,6 +323,7 @@ class ProjectNav(QScrollArea):
             self.ensureWidgetVisible(b, 20, 0)
 
     def wheelEvent(self, event):
+        self._hide_tip_now()
         bar = self.horizontalScrollBar()
         d = event.angleDelta()
         bar.setValue(bar.value() - (d.y() or d.x()))

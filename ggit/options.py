@@ -9,6 +9,7 @@ class ViewOptions:
     encoding: str = "auto"       # auto / utf-8 / gb18030
     diff_mode: str = "unified"   # unified：上下合并；split：左右对照
     work_mode: str = "git"       # git：提交图 + diff；file：文件树 + 文件预览
+    font_size: int = 9           # 全局字体大小 (pt)
 
     def copy(self) -> "ViewOptions":
         return replace(self)

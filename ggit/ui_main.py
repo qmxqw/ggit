@@ -80,6 +80,11 @@ class MainWindow(QMainWindow):
                 self.options.diff_mode = opts["diff_mode"]
             if opts.get("work_mode") in ("git", "file"):
                 self.options.work_mode = opts["work_mode"]
+            if isinstance(opts.get("font_size"), int) and 6 <= opts["font_size"] <= 28:
+                self.options.font_size = opts["font_size"]
+
+        if self.options.font_size != 9:
+            self._apply_font_size(self.options.font_size)
 
         self._build_ui()
         self._build_menu()
@@ -113,18 +118,20 @@ class MainWindow(QMainWindow):
 
         bar = QFrame()
         bar.setObjectName("topBar")
-        bar.setStyleSheet("QFrame#topBar{background:#2d2d30;}")
+        bar.setStyleSheet("QFrame#topBar{background:#2d2d30;} QFrame#topBar QToolButton::menu-indicator{image:none;width:0px;}")
         h = QHBoxLayout(bar)
         h.setContentsMargins(0, 0, 8, 0)
         h.setSpacing(6)
         self.nav = ProjectNav()
         self.nav.selected.connect(self.switch_to)
+        self.nav.reordered.connect(self.move_project)
         h.addWidget(self.nav, 1)
 
         self.more_menu = QMenu(self)
         self.more_btn = QToolButton()
         self.more_btn.setText("全部项目 ▾")
         self.more_btn.setToolTip("所有项目（也可以按 Ctrl+P 搜索切换）")
+        self.more_btn.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
         self.more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.more_btn.setMenu(self.more_menu)
         h.addWidget(self.more_btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -177,8 +184,8 @@ class MainWindow(QMainWindow):
         v = mb.addMenu("查看(&V)")
         self._act(v, "切换工作模式（git / 文件）", "Alt+F", self.toggle_work_mode)
         self._act(v, "切换 diff 模式（上下合并 / 左右对照）", "Alt+D", self.toggle_diff_mode)
-        self._act(v, "下一处改动", "F8", lambda: self._goto_change(True))
-        self._act(v, "上一处改动", "Shift+F8", lambda: self._goto_change(False))
+        self._act(v, "上一处改动", "F3", lambda: self._goto_change(False))
+        self._act(v, "下一处改动", "F4", lambda: self._goto_change(True))
         v.addSeparator()
         self._act(v, "分支列表…（所有本地 / 远端分支）", "Ctrl+B", self.branch_picker)
         self._act(v, "查看文件历史…（搜索文件）", "Ctrl+F", self.file_search)
@@ -202,6 +209,11 @@ class MainWindow(QMainWindow):
             grp.addAction(a)
             enc.addAction(a)
 
+        v.addSeparator()
+        self._act(v, "放大字体", "Ctrl+=", lambda: self.change_font_size(1))
+        self._act(v, "缩小字体", "Ctrl+-", lambda: self.change_font_size(-1))
+        self._act(v, "重置字体大小", "Ctrl+Shift+0", self.reset_font_size)
+
         hm = mb.addMenu("帮助(&H)")
         self._act(hm, "关于 ggit", None, self._about)
 
@@ -213,6 +225,9 @@ class MainWindow(QMainWindow):
         nxt.activated.connect(lambda: self._cycle(1))
         prv = QShortcut(QKeySequence("Ctrl+Shift+Tab"), self)
         prv.activated.connect(lambda: self._cycle(-1))
+        # 放大字体额外支持 Ctrl++（含数字小键盘与按住 Shift 的情况）
+        sc_plus = QShortcut(QKeySequence("Ctrl++"), self)
+        sc_plus.activated.connect(lambda: self.change_font_size(1))
 
     # ================================================================== 托盘 / 后台
     def _build_tray(self):
@@ -283,10 +298,29 @@ class MainWindow(QMainWindow):
         e = self.projects[i]
         bd = self.badges.get(e.path)
         key = str((i + 1) % 10)
+        tip_lines = [f"项目：{e.name}", f"路径：{e.path}"]
+        if bd is not None:
+            if bd.error:
+                tip_lines.append("状态：无法读取项目状态")
+            else:
+                branch_str = bd.branch or "HEAD 分离"
+                status_parts = []
+                if bd.dirty:
+                    status_parts.append("● 有未提交改动")
+                if bd.ahead:
+                    status_parts.append(f"↑ 领先远端 {bd.ahead} 个提交")
+                if bd.behind:
+                    status_parts.append(f"↓ 落后远端 {bd.behind} 个提交")
+                if not status_parts:
+                    status_parts.append("✔ 工作区干净，与远端同步")
+                tip_lines.append(f"分支：{branch_str}")
+                tip_lines.append(f"状态：{' · '.join(status_parts)}")
+        tip = "\n".join(tip_lines)
+
         if bd is None:
-            b.set_info(key, e.name, "", False, 0, 0, False, False, e.path)
+            b.set_info(key, e.name, "", False, 0, 0, False, False, tip)
         else:
-            b.set_info(key, e.name, bd.branch, bd.dirty, bd.ahead, bd.behind, bd.error, True, e.path)
+            b.set_info(key, e.name, bd.branch, bd.dirty, bd.ahead, bd.behind, bd.error, True, tip)
 
     def rebuild_nav(self):
         n = min(MAX_TABS, len(self.projects))
@@ -411,14 +445,24 @@ class MainWindow(QMainWindow):
             self._update_title()
             self._save_config()
 
-    def move_current(self, step: int):
-        j = self.current + step
-        if not (0 <= self.current < len(self.projects) and 0 <= j < len(self.projects)):
+    def move_project(self, from_idx: int, to_idx: int) -> None:
+        if not (0 <= from_idx < len(self.projects) and 0 <= to_idx < len(self.projects)):
             return
-        self.projects[self.current], self.projects[j] = self.projects[j], self.projects[self.current]
-        self.current = j
+        if from_idx == to_idx:
+            return
+        item = self.projects.pop(from_idx)
+        self.projects.insert(to_idx, item)
+        if self.current == from_idx:
+            self.current = to_idx
+        elif from_idx < self.current <= to_idx:
+            self.current -= 1
+        elif to_idx <= self.current < from_idx:
+            self.current += 1
         self.rebuild_nav()
         self._save_config()
+
+    def move_current(self, step: int):
+        self.move_project(self.current, self.current + step)
 
     # ================================================================== 刷新
     def refresh_current(self):
@@ -520,8 +564,66 @@ class MainWindow(QMainWindow):
             f"<b>ggit {__version__}</b><br>多项目 Git 只读查看工具。<br><br>"
             "显示 / 隐藏（全局）：Alt+G<br>切换 git / 文件工作模式：Alt+F<br>"
             "切换项目：Ctrl+1…0 / Ctrl+Tab / Ctrl+P<br>刷新：F5<br>分支列表：Ctrl+B（或点左上角的分支名）<br>文件历史：Ctrl+F<br>"
-            "切换 diff 模式：Alt+D<br>上一处 / 下一处改动：Shift+F8 / F8<br>"
+            "切换 diff 模式：Alt+D<br>上一处 / 下一处改动：F3 / F4<br>"
             "关闭文档：Ctrl+W")
+
+    # ================================================================== 字体缩放
+    def change_font_size(self, delta: int) -> None:
+        new_size = max(7, min(24, self.options.font_size + delta))
+        if new_size == self.options.font_size:
+            return
+        self.options.font_size = new_size
+        self._apply_font_size(new_size)
+        self._save_config()
+        self.statusBar().showMessage(f"全局字体大小已调整为: {new_size} pt (按 Ctrl +/- 调节)", 2500)
+
+    def reset_font_size(self) -> None:
+        if self.options.font_size == 9:
+            return
+        self.options.font_size = 9
+        self._apply_font_size(9)
+        self._save_config()
+        self.statusBar().showMessage("全局字体大小已恢复为默认 (9 pt)", 2500)
+
+    def _apply_font_size(self, size: int) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            f = app.font()
+            f.setPointSize(size)
+            app.setFont(f)
+
+        # 1. 全局与全部子控件级联应用新字号
+        font = self.font()
+        font.setPointSize(size)
+        self.setFont(font)
+        for w in self.findChildren(QWidget):
+            from PySide6.QtWidgets import QPlainTextEdit
+            if isinstance(w, QPlainTextEdit):
+                continue
+            w.setFont(font)
+            w.update()
+
+        # 2. 顶部导航
+        if hasattr(self, "nav"):
+            self.nav.setFont(font)
+            self.nav.update()
+
+        # 3. 项目视图与提交树、更改列表
+        for view in self.views.values():
+            view.setFont(font)
+            if hasattr(view, "model"):
+                view.model.layoutChanged.emit()
+            if hasattr(view, "graph"):
+                view.graph.viewport().update()
+            if hasattr(view, "changes"):
+                view.changes.viewport().update()
+
+            # 4. 当前已打开的文档实时重新排版正文与行号
+            for doc_area in (getattr(view, "docs", None), getattr(view, "file_docs", None)):
+                if doc_area is not None:
+                    for doc in list(doc_area._docs.values()):
+                        if hasattr(doc.view, "apply_font_size"):
+                            doc.view.apply_font_size(size)
 
     # ================================================================== 保存
     def _save_config(self):
@@ -534,5 +636,6 @@ class MainWindow(QMainWindow):
                         "ignore_eol": self.options.ignore_eol,
                         "encoding": self.options.encoding,
                         "diff_mode": self.options.diff_mode,
-                        "work_mode": self.options.work_mode},
+                        "work_mode": self.options.work_mode,
+                        "font_size": self.options.font_size},
         })

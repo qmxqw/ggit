@@ -128,6 +128,9 @@ class ProjectView(QWidget):
         self._snap_task = None
         self._graph_task = None
         self._hist_task = None
+        self._branches_cache: list = []
+        self._branches_loading: bool = False
+        self._branch_task = None
         self._build_ui()
 
     # ================================================================== 界面
@@ -143,24 +146,66 @@ class ProjectView(QWidget):
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(0)
-        status_row = QWidget()
-        sl = QHBoxLayout(status_row)
-        sl.setContentsMargins(4, 2, 8, 2)
-        sl.setSpacing(4)
+        # 优化：状态栏重构为高质感双行卡片条，主次分明，与右侧水平对齐
+        status_bar = QFrame()
+        status_bar.setObjectName("projectStatusBar")
+        status_bar.setStyleSheet("""
+            QFrame#projectStatusBar {
+                background: #252528;
+                border-bottom: 1px solid #38383c;
+            }
+        """)
+        sv = QVBoxLayout(status_bar)
+        sv.setContentsMargins(10, 6, 10, 6)
+        sv.setSpacing(3)
+
+        # 第 1 行：分支胶囊按钮 + 同步状态徽标
+        row1 = QWidget()
+        r1 = QHBoxLayout(row1)
+        r1.setContentsMargins(0, 0, 0, 0)
+        r1.setSpacing(8)
+
         self.branch_btn = QToolButton()
-        self.branch_btn.setText("⎇ …")
-        self.branch_btn.setAutoRaise(True)
+        self.branch_btn.setText("⎇ … ▾")
         self.branch_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.branch_btn.setToolTip("点击查看所有分支（本地 + 远端），选一个只看它的历史  (Ctrl+B)")
-        bf = self.branch_btn.font()
-        bf.setBold(True)
-        self.branch_btn.setFont(bf)
-        self.branch_btn.clicked.connect(lambda _=False: self.open_branch_picker())
-        self.status_label = QLabel("加载中…")
-        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        sl.addWidget(self.branch_btn)
-        sl.addWidget(self.status_label, 1)
-        lv.addWidget(status_row)
+        self.branch_btn.setToolTip("点击展开分支列表切换查看（本地 / 远端）  (Ctrl+B)")
+        self.branch_btn.setStyleSheet("""
+            QToolButton {
+                background: #36363c;
+                color: #ffffff;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 3px 8px;
+                border: 1px solid #484850;
+            }
+            QToolButton:hover {
+                background: #44444c;
+                border-color: #0e7ad1;
+            }
+            QToolButton::menu-indicator {
+                image: none;
+            }
+        """)
+        self.branch_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.branch_menu = QMenu(self)
+        self.branch_menu.setObjectName("branchMenu")
+        self.branch_menu.aboutToShow.connect(self._rebuild_branch_menu)
+        self.branch_btn.setMenu(self.branch_menu)
+        r1.addWidget(self.branch_btn)
+
+        self.sync_badge = QLabel()
+        r1.addWidget(self.sync_badge)
+        r1.addStretch(1)
+        sv.addWidget(row1)
+
+        # 第 2 行：上游远端与 fetch 时间（次要元数据，浅灰舒展）
+        self.status_meta = QLabel("加载中…")
+        self.status_meta.setStyleSheet("color: #8a8a8e;")
+        self.status_meta.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.status_label = self.status_meta
+        sv.addWidget(self.status_meta)
+
+        lv.addWidget(status_bar)
 
         self.left_split = QSplitter(Qt.Orientation.Vertical)
         lv.addWidget(self.left_split, 1)
@@ -220,12 +265,25 @@ class ProjectView(QWidget):
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
         rv.setSpacing(0)
+
+        info_bar = QFrame()
+        info_bar.setObjectName("projectInfoBar")
+        info_bar.setStyleSheet("""
+            QFrame#projectInfoBar {
+                background: #252528;
+                border-bottom: 1px solid #38383c;
+            }
+        """)
+        iv = QVBoxLayout(info_bar)
+        iv.setContentsMargins(12, 6, 12, 6)
+        iv.setSpacing(2)
+
         self.info = QLabel()
         self.info.setWordWrap(True)
-        self.info.setContentsMargins(10, 6, 10, 6)
         self.info.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        rv.addWidget(self.info)
+        iv.addWidget(self.info)
+        rv.addWidget(info_bar)
         self.docs = DocArea(self.runner, self.options, lambda: DiffDocument(self.options.diff_mode),
                             "在左侧点一个文件，查看它的差异。\n\n每点一个文件就新开一个标签，旧的标签不会被关掉；\n用标签上的 ×、鼠标中键或 Ctrl+W 关闭。")
         rv.addWidget(self.docs, 1)
@@ -283,8 +341,9 @@ class ProjectView(QWidget):
         if not self._alive or gen != self._gen:
             return
         self.error = str(err)
-        self.status_label.setText(f"<span style='color:#f14c4c'>{html.escape(self.error)}</span>")
-        self.status_label.setToolTip(self.error)
+        self.sync_badge.setText("<span style='color:#f14c4c; font-weight:bold;'>读取失败</span>")
+        self.status_meta.setText(f"<span style='color:#f14c4c'>{html.escape(self.error)}</span>")
+        self.status_meta.setToolTip(self.error)
         self.statusChanged.emit(self)
 
     def _on_snapshot(self, gen, snap, force):
@@ -315,6 +374,7 @@ class ProjectView(QWidget):
             if self._hist_path and self.left_stack.currentIndex() == 1:
                 self._load_history(self._hist_path, quiet=True)
         self.statusChanged.emit(self)
+        self._refresh_branches()
 
     def _update_status_label(self):
         snap = self.snap
@@ -326,21 +386,39 @@ class ProjectView(QWidget):
         else:
             head = "尚无提交 ▾"
         self.branch_btn.setText(head)
-        parts = []
+
+        badges = []
+        if s.ahead:
+            badges.append(f"<span style='background:rgba(115,201,145,0.18); color:#73c991; padding:2px 7px; border-radius:3px; font-weight:bold;'>↑ {s.ahead}</span>")
+        if s.behind:
+            badges.append(f"<span style='background:rgba(255,158,100,0.18); color:#ff9e64; padding:2px 7px; border-radius:3px; font-weight:bold;'>↓ {s.behind}</span>")
+        if not s.ahead and not s.behind and s.upstream:
+            badges.append("<span style='color:#73c991; font-weight:bold;'>✔ 已同步</span>")
+        elif not s.upstream and s.branch:
+            badges.append("<span style='color:#8a8a8e;'>本地独有</span>")
+        self.sync_badge.setText("  ".join(badges))
+
+        meta_parts = []
         if s.upstream:
-            parts.append(f"↑{s.ahead} ↓{s.behind}  → {s.upstream}")
-        elif s.branch:
-            parts.append("无上游分支")
-        parts.append(f"上次 fetch：{ago(s.last_fetch)}" if s.last_fetch else "从未 fetch")
+            meta_parts.append(f"→ {html.escape(s.upstream)}")
+        meta_parts.append(f"fetch: {ago(s.last_fetch)}" if s.last_fetch else "未 fetch")
         n_local = sum(1 for r in snap.refs if r.startswith("refs/heads/"))
         n_remote = sum(1 for r in snap.refs if r.startswith("refs/remotes/") and not r.endswith("/HEAD"))
-        parts.append(f"本地 {n_local} · 远端 {n_remote} 个分支")
-        self.status_label.setText("    ".join(parts))
-        tip = [self.path]
+        meta_parts.append(f"本地 {n_local} · 远端 {n_remote}")
+        self.status_meta.setText("   ·   ".join(meta_parts))
+
+        tip = [f"项目：{self.name}", f"路径：{self.path}"]
+        if s.branch:
+            tip.append(f"分支：{s.branch}")
+        if s.upstream:
+            tip.append(f"上游：{s.upstream} (领先 {s.ahead}，落后 {s.behind})")
         if s.last_fetch:
             tip.append(f"上次 fetch：{fmt_time(s.last_fetch)}")
-        tip.append("远端信息来自本地已有的远端引用（离线），按 F5 刷新本地状态。")
-        self.status_label.setToolTip("\n".join(tip))
+        tip.append(f"统计：本地 {n_local} 个分支，远端 {n_remote} 个分支")
+        tip.append("提示：按 F5 刷新状态；Ctrl+B 查看分支列表")
+        tip_text = "\n".join(tip)
+        self.sync_badge.setToolTip(tip_text)
+        self.status_meta.setToolTip(tip_text)
 
     # ================================================================== 更改列表
     def _fill_changes(self, changes):
@@ -420,34 +498,135 @@ class ProjectView(QWidget):
         if self.snap is not None:
             self._reload_graph()
 
-    # ---------------------------------------------------------------- 分支列表
-    def open_branch_picker(self):
-        """点左上角的分支名（或 Ctrl+B）：列出所有本地 / 远端分支，选一个只看它的历史。"""
-        path = self.path
-        self.runner.submit(lambda: gitcore.get_branches(path), self._on_branches,
-                           lambda e: self.info.setText(
-                               f"<span style='color:#f14c4c'>读取分支失败：{html.escape(str(e))}</span>"))
+    # ---------------------------------------------------------------- 分支下拉列表
+    def _apply_branch_menu_style(self):
+        base = self.font()
+        base_size = base.pointSizeF() if base.pointSizeF() > 0 else float(base.pointSize())
+        # 大尺寸分支下拉菜单：字号比常规大 25%，行高与内边距宽阔，触控点击更舒适
+        font_sz = max(12, int(round(base_size * 1.25)))
+        padding_v = max(7, int(round(base_size * 0.7)))
+        self.branch_menu.setStyleSheet(f"""
+            QMenu#branchMenu {{
+                background-color: #252528;
+                border: 1px solid #3c3c40;
+                border-radius: 6px;
+                padding: 6px 4px;
+            }}
+            QMenu#branchMenu::item {{
+                padding: {padding_v}px 18px;
+                border-radius: 4px;
+                color: #e0e0e0;
+                font-size: {font_sz}px;
+                margin: 2px 4px;
+            }}
+            QMenu#branchMenu::item:selected {{
+                background-color: #0e7ad1;
+                color: #ffffff;
+            }}
+            QMenu#branchMenu::item:disabled {{
+                color: #727278;
+                font-weight: bold;
+                padding: 6px 14px 2px 14px;
+            }}
+            QMenu#branchMenu::separator {{
+                height: 1px;
+                background: #38383c;
+                margin: 5px 8px;
+            }}
+        """)
 
-    def _on_branches(self, branches):
+    def _refresh_branches(self):
+        if self._branches_loading or not self._alive:
+            return
+        self._branches_loading = True
+        path = self.path
+        if self._branch_task is not None:
+            self.runner.cancel(self._branch_task)
+            self._branch_task = None
+        self._branch_task = self.runner.submit(
+            lambda: gitcore.get_branches(path),
+            self._on_branches_loaded,
+            self._on_branches_error
+        )
+
+    def _on_branches_loaded(self, branches):
+        self._branches_loading = False
+        self._branch_task = None
         if not self._alive:
             return
-        items = [("★   显示全部分支（本地 + 远端 + 标签）", "all")]
-        for b in branches:
-            icon = "◎" if b.is_current else ("☁" if b.kind == "remote" else "⎇")
-            bits = [f"{icon}  {b.name}"]
-            if b.kind == "local" and b.upstream:
-                bits.append("上游已失效" if b.gone else f"↑{b.ahead} ↓{b.behind} → {b.upstream}")
-            if b.time:
-                bits.append(ago(b.time))
-            if b.subject:
-                bits.append(b.subject)
-            items.append(("      ".join(bits), b.ref))
-        n_local = sum(1 for b in branches if b.kind == "local")
-        dlg = PickerDialog(f"分支：本地 {n_local} 个 · 远端 {len(branches) - n_local} 个 — 选中后只看它的历史",
-                           items, self.window(), "输入分支名过滤…")
-        dlg.resize(960, 500)
-        if dlg.exec() and dlg.value:
-            self._set_scope_ref(dlg.value)
+        self._branches_cache = branches
+        if self.branch_menu.isVisible():
+            self._rebuild_branch_menu()
+
+    def _on_branches_error(self, err):
+        self._branches_loading = False
+        self._branch_task = None
+
+    def _rebuild_branch_menu(self):
+        self._apply_branch_menu_style()
+        self.branch_menu.clear()
+
+        # 1. 显示全部分支（全部本地 + 远端 + 标签）
+        act_all = self.branch_menu.addAction("★   显示全部分支（本地 + 远端 + 标签）")
+        act_all.setCheckable(True)
+        act_all.setChecked(self._scope == gitcore.SCOPE_ALL)
+        act_all.triggered.connect(lambda _=False: self._set_scope_ref("all"))
+
+        branches = self._branches_cache
+        if not branches:
+            if self._branches_loading:
+                act_loading = self.branch_menu.addAction("正在加载分支列表…")
+                act_loading.setEnabled(False)
+            else:
+                self._refresh_branches()
+            return
+
+        # 2. 本地分支
+        local_branches = [b for b in branches if b.kind == "local"]
+        if local_branches:
+            self.branch_menu.addSeparator()
+            title_local = self.branch_menu.addAction("── 本地分支 ──")
+            title_local.setEnabled(False)
+            for b in local_branches:
+                icon = "● " if b.is_current else "⎇  "
+                parts = [f"{icon}{b.name}"]
+                meta = []
+                if b.upstream:
+                    meta.append("上游已失效" if b.gone else f"↑{b.ahead} ↓{b.behind} → {b.upstream}")
+                if b.time:
+                    meta.append(ago(b.time))
+                if meta:
+                    parts.append(f"  ({' · '.join(meta)})")
+                text = "".join(parts)
+
+                act = self.branch_menu.addAction(text)
+                act.setCheckable(True)
+                is_active = (self._scope == "ref:" + b.ref) or (b.is_current and self._scope == gitcore.SCOPE_AUTO)
+                act.setChecked(is_active)
+                ref = b.ref
+                act.triggered.connect(lambda _=False, r=ref: self._set_scope_ref(r))
+
+        # 3. 远端分支
+        remote_branches = [b for b in branches if b.kind == "remote"]
+        if remote_branches:
+            self.branch_menu.addSeparator()
+            title_remote = self.branch_menu.addAction("── 远端分支 ──")
+            title_remote.setEnabled(False)
+            for b in remote_branches:
+                parts = [f"☁  {b.name}"]
+                if b.time:
+                    parts.append(f"  ({ago(b.time)})")
+                text = "".join(parts)
+                act = self.branch_menu.addAction(text)
+                act.setCheckable(True)
+                act.setChecked(self._scope == "ref:" + b.ref)
+                ref = b.ref
+                act.triggered.connect(lambda _=False, r=ref: self._set_scope_ref(r))
+
+    def open_branch_picker(self):
+        """展开大尺寸分支下拉菜单（替代旧模态弹窗，支持快捷键 Ctrl+B 与主菜单调用）。"""
+        self._rebuild_branch_menu()
+        self.branch_btn.showMenu()
 
     def _set_scope_ref(self, value: str):
         self.close_history()
@@ -830,3 +1009,6 @@ class ProjectView(QWidget):
 
     def dispose(self):
         self._alive = False
+        if self._branch_task is not None:
+            self.runner.cancel(self._branch_task)
+            self._branch_task = None

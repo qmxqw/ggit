@@ -6,14 +6,14 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QApplication
 from ggit.async_runner import AsyncRunner, CancellationToken, GitCancelledError
 
 
 class AsyncRunnerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.app = QCoreApplication.instance() or QCoreApplication(sys.argv)
+        cls.app = QApplication.instance() or QApplication(sys.argv)
 
     def test_cancel_token(self):
         token = CancellationToken()

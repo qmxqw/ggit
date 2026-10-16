@@ -4,7 +4,7 @@
   split  ：左右对照——左边修改前、右边修改后，显示整个文件，两侧行对齐，短的一侧补灰色空行
 
 两种模式都用加宽的垂直滚动条：条上用红 / 绿色块标出每一处改动的位置，点色块直接跳过去；
-也可以用 F8 / Shift+F8（或标题栏的 ↓ ↑）逐处跳转。
+也可以用 F3 / F4（或标题栏的 ↑ ↓）逐处跳转。
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import sys
 from PySide6.QtCore import QRect, QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QPainter, QTextBlockFormat,
                            QTextCharFormat, QTextCursor)
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit,
+from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit,
                                QScrollBar, QSizePolicy, QStackedWidget, QToolButton,
                                QVBoxLayout, QWidget)
 
@@ -160,16 +160,34 @@ class _CodeView(QPlainTextEdit):
         self.setReadOnly(True)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.setFrameShape(QFrame.Shape.NoFrame)
+        app = QApplication.instance()
+        base_pt = app.font().pointSize() if app and app.font().pointSize() > 0 else 9
+        code_pt = max(8, base_pt + 1)
         if sys.platform == "win32":
-            font = QFont("Consolas", 10)
+            font = QFont("Consolas", code_pt)
         else:
             font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+            font.setPointSize(code_pt)
         self.setFont(font)
         self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
         self._gutter = _Gutter(self)
         self.blockCountChanged.connect(self._update_margin)
         self.updateRequest.connect(self._on_update_request)
         self._update_margin()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.Type.FontChange:
+            app = QApplication.instance()
+            base_pt = app.font().pointSize() if app and app.font().pointSize() > 0 else 9
+            target_pt = max(8, base_pt + 1)
+            f = self.font()
+            if f.pointSize() != target_pt:
+                f.setPointSize(target_pt)
+                self.setFont(f)
+                self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
+                self._update_margin()
 
     def set_blocks(self, blocks: list) -> None:
         self._nums = [b.nums for b in blocks]
@@ -400,10 +418,10 @@ class DiffDocument(QWidget):
         self.mode_btn.setToolTip("切换 diff 模式：上下合并 / 左右对照 (Alt+D)")
         self.prev_btn = QToolButton()
         self.prev_btn.setText("↑")
-        self.prev_btn.setToolTip("上一处改动 (Shift+F8)")
+        self.prev_btn.setToolTip("上一处改动 (F3)")
         self.next_btn = QToolButton()
         self.next_btn.setText("↓")
-        self.next_btn.setToolTip("下一处改动 (F8)")
+        self.next_btn.setToolTip("下一处改动 (F4)")
         for w in (self.title,):
             bl.addWidget(w, 1)
         for w in (self.stats, self.mode_btn, self.prev_btn, self.next_btn):
@@ -452,6 +470,17 @@ class DiffDocument(QWidget):
 
     def show_result(self, fd, keep_scroll: bool = False) -> None:
         self.set_diff(fd, keep_scroll)
+
+    def apply_font_size(self, size: int) -> None:
+        code_pt = max(8, size + 1)
+        family = "Consolas" if sys.platform == "win32" else QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
+        font = QFont(family, code_pt)
+        for v in (self.unified, self.split.left, self.split.right):
+            v.setFont(font)
+            v.setTabStopDistance(v.fontMetrics().horizontalAdvance(" ") * 4)
+            v._update_margin()
+        if self.fd is not None:
+            self._render(True)
 
     @staticmethod
     def result_signature(fd):

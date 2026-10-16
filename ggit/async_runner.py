@@ -67,7 +67,10 @@ class _Job(QRunnable):
             except BaseException as e:             # noqa: BLE001 —— 任何错误都要回传给界面
                 res, err = None, e
             if not self.cancel_token.cancelled:
-                self.signals.finished.emit(self.token_id, res, err)
+                try:
+                    self.signals.finished.emit(self.token_id, res, err)
+                except RuntimeError:
+                    pass
         finally:
             _thread_local.token = None
 
