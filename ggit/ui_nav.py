@@ -208,7 +208,7 @@ class ProjectNav(QScrollArea):
             w.setPalette(pal)
         self._buttons: list = []
 
-        # 毫秒级 Tooltip 调度器：180ms 快速唤起，防抖微动必定触发，平移项目无缝秒切
+        # Tooltip 控制：0 延迟即时显示与瞬间隐藏，彻底干掉等待
         self._tip_timer = QTimer(self)
         self._tip_timer.setSingleShot(True)
         self._tip_timer.timeout.connect(self._on_tip_timeout)
@@ -223,22 +223,19 @@ class ProjectNav(QScrollArea):
     def _on_button_enter(self, btn: ProjectButton) -> None:
         if self._tip_leave_timer.isActive():
             self._tip_leave_timer.stop()
+        if self._tip_timer.isActive():
+            self._tip_timer.stop()
         self._hovered_btn = btn
         if not getattr(btn, "tip", None):
             return
-        if self._active_tip_btn is not None:
-            # 已经在浏览 ToolTip：鼠标在项目间平移时 0ms 瞬间切换显示，无等待感
-            self._show_tip(btn)
-        else:
-            # 首次悬停：180ms 快速响应（原系统默认 ~700ms 且鼠标微动会被压制）
-            self._tip_timer.start(180)
+        # 0 等待即时秒弹
+        self._show_tip(btn)
 
     def _on_button_leave(self, btn: ProjectButton) -> None:
         if self._hovered_btn == btn:
             self._hovered_btn = None
-            if self._tip_timer.isActive():
-                self._tip_timer.stop()
-            self._tip_leave_timer.start(80)
+            # 鼠标移出立即瞬间隐藏，无残留等待
+            self._hide_tip_now()
 
     def _on_tip_timeout(self) -> None:
         if self._hovered_btn is not None and getattr(self._hovered_btn, "tip", None):
@@ -256,7 +253,7 @@ class ProjectNav(QScrollArea):
         top_left = btn.mapToGlobal(QPoint(0, 0))
         btn_bottom_y = top_left.y() + btn.height()
         pos = QPoint(top_left.x() - 2, btn_bottom_y - 15)
-        QToolTip.showText(pos, btn.tip)
+        QToolTip.showText(pos, btn.tip, btn)
         self._active_tip_btn = btn
 
     def _hide_tip_now(self) -> None:

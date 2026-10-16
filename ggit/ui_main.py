@@ -58,6 +58,8 @@ class MainWindow(QMainWindow):
         self.resize(1440, 880)
         self.runner = AsyncRunner(self)
         self.options = ViewOptions()
+        QApplication.setEffectEnabled(Qt.UIEffect.UI_AnimateTooltip, False)
+        QApplication.setEffectEnabled(Qt.UIEffect.UI_FadeTooltip, False)
         self.projects: list = []
         self.views: dict = {}          # 路径 -> ProjectView
         self.badges: dict = {}         # 路径 -> Badge

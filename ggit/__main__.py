@@ -64,6 +64,10 @@ def main() -> int:
     from .icon import app_icon
     app.setWindowIcon(app_icon())
 
+    from PySide6.QtCore import Qt
+    QApplication.setEffectEnabled(Qt.UIEffect.UI_AnimateTooltip, False)
+    QApplication.setEffectEnabled(Qt.UIEffect.UI_FadeTooltip, False)
+
     # ---- 单实例：已经有一个在运行，就通知它显示出来，然后退出 ----
     name = "ggit-single-instance"
     sock = QLocalSocket()

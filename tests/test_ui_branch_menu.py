@@ -138,7 +138,6 @@ class UIBranchMenuTest(unittest.TestCase):
         from PySide6.QtGui import QEnterEvent
         from PySide6.QtCore import QPoint
         from ggit.ui_nav import ProjectNav
-        import time
 
         nav = ProjectNav()
         nav.rebuild(2)
@@ -147,11 +146,9 @@ class UIBranchMenuTest(unittest.TestCase):
         b0.set_info("1", "repo0", "main", False, 0, 0, False, True, "Tip content for repo0")
         b1.set_info("2", "repo1", "dev", False, 0, 0, False, True, "Tip content for repo1")
 
-        # 模拟进入 b0
+        # 模拟进入 b0：0 延迟秒弹，无需 sleep 等待
         enter0 = QEnterEvent(QPoint(10, 10), QPoint(10, 10), b0.mapToGlobal(QPoint(10, 10)))
         b0.enterEvent(enter0)
-        # 180ms 触发
-        time.sleep(0.2)
         self.app.processEvents()
         self.assertIn("repo0", QToolTip.text())
 
@@ -165,6 +162,47 @@ class UIBranchMenuTest(unittest.TestCase):
         nav._hide_tip_now()
         self.assertIsNone(nav._active_tip_btn)
         nav.deleteLater()
+
+    def test_graph_view_instant_tooltip(self):
+        from PySide6.QtWidgets import QToolTip
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+        from ggit.ui_graph import CommitModel, GraphView
+        from ggit.items import Row
+        from ggit.graph import GraphRow
+        from ggit.gitcore import Commit
+
+        view = GraphView()
+        model = CommitModel()
+        view.setModel(model)
+        c0 = Commit(oid="1111111111111111111111111111111111111111", parents=[], author="alice", time=1000, subject="commit 1", refs=[])
+        c1 = Commit(oid="2222222222222222222222222222222222222222", parents=[], author="bob", time=2000, subject="commit 2", refs=[])
+        gr = GraphRow(col=0, color=0)
+        model.reset([Row(c0, gr), Row(c1, gr)], head_oid=c0.oid, more=False)
+        view.resize(400, 300)
+        view.show()
+        self.app.processEvents()
+
+        # 模拟鼠标移动到第 0 行 (y ≈ 13)
+        ev0 = QMouseEvent(QEvent.Type.MouseMove, QPointF(50, 13), QPointF(50, 13), Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        view.mouseMoveEvent(ev0)
+        self.app.processEvents()
+        self.assertIn("commit 1", QToolTip.text())
+
+        # 模拟鼠标移动到第 1 行 (y ≈ 39)
+        ev1 = QMouseEvent(QEvent.Type.MouseMove, QPointF(50, 39), QPointF(50, 39), Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        view.mouseMoveEvent(ev1)
+        self.app.processEvents()
+        self.assertIn("commit 2", QToolTip.text())
+
+        # 模拟鼠标按下隐藏
+        press_ev = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(50, 39), QPointF(50, 39), Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        view.mousePressEvent(press_ev)
+        self.app.processEvents()
+        self.assertEqual(view._last_hover_row, -1)
+
+        view.close()
+        view.deleteLater()
 
 
 if __name__ == "__main__":

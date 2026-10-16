@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import (QAbstractListModel, QModelIndex, QPointF, QRectF, QSize, Qt,
-                            Signal)
+from PySide6.QtCore import (QAbstractListModel, QEvent, QModelIndex, QPoint, QPointF, QRectF,
+                            QSize, Qt, Signal)
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPalette, QPen
-from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStyle, QStyledItemDelegate
+from PySide6.QtWidgets import (QAbstractItemView, QFrame, QListView, QStyle,
+                               QStyledItemDelegate, QToolTip)
 
 from . import theme
 from .gitcore import Commit
@@ -340,8 +341,54 @@ class GraphView(QListView):
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._last_hover_row = -1
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        pos = event.position().toPoint()
+        idx = self.indexAt(pos)
+        row = idx.row() if idx.isValid() else -1
+        if row != self._last_hover_row:
+            self._last_hover_row = row
+            if idx.isValid() and self.model() is not None:
+                tip = self.model().data(idx, Qt.ItemDataRole.ToolTipRole)
+                if tip:
+                    global_pos = self.viewport().mapToGlobal(pos)
+                    # 鼠标右下方微距偏移，避免遮挡当前光标所在行且 0 延迟秒弹
+                    tip_pos = QPoint(global_pos.x() + 10, global_pos.y() + 16)
+                    QToolTip.showText(tip_pos, tip, self.viewport())
+                else:
+                    QToolTip.hideText()
+            else:
+                QToolTip.hideText()
+
+    def mousePressEvent(self, event):
+        self._last_hover_row = -1
+        QToolTip.hideText()
+        super().mousePressEvent(event)
+
+    def wheelEvent(self, event):
+        self._last_hover_row = -1
+        QToolTip.hideText()
+        super().wheelEvent(event)
+
+    def leaveEvent(self, event):
+        self._last_hover_row = -1
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            # 屏蔽 Qt 系统默认 ~700ms 滞后 QHelpEvent，避免重复二次触发
+            return True
+        if event.type() == QEvent.Type.Leave:
+            self._last_hover_row = -1
+            QToolTip.hideText()
+        return super().viewportEvent(event)
 
     def keyPressEvent(self, event):
+        self._last_hover_row = -1
+        QToolTip.hideText()
         idx = self.currentIndex()
         if idx.isValid():
             key = event.key()
