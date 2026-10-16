@@ -88,23 +88,29 @@ class UIBranchMenuTest(unittest.TestCase):
         b0.mouseMoveEvent(move_unselected)
         self.assertFalse(b0._is_dragging)
 
-        # 当前打开的项目（checked=True）按住移动正常触发拖拽
+        # 当前打开的项目（checked=True）按住移动正常触发拖拽与实时平移
         b0.setChecked(True)
         b0.mousePressEvent(press_unselected)
         b0.mouseMoveEvent(move_unselected)
         self.assertTrue(b0._is_dragging)
+        self.assertGreater(b0.x(), 0)
+        self.assertFalse(nav._placeholder.isHidden())
 
         events = []
         nav.reordered.connect(lambda f, t: events.append((f, t)))
 
         # 模拟将 0 号按钮拖到 2 号按钮的位置 (x 约为 450)
         nav._handle_drag_move(b0, 450)
-        # 拖拽实时让位，b0 应该被移到索引 2
+        # 拖拽实时让位，b0 应该被移到索引 2，且占位槽显现并处于索引 2
         self.assertEqual(nav._buttons, [b1, b2, b0])
+        self.assertFalse(nav._placeholder.isHidden())
+        self.assertEqual(nav._lay.indexOf(nav._placeholder), 2)
 
         # 释放鼠标
         nav._handle_drag_release(b0, start_idx=0)
         self.assertEqual(events, [(0, 2)])
+        self.assertTrue(nav._placeholder.isHidden())
+        self.assertEqual(nav._lay.indexOf(b0), 2)
 
         nav.deleteLater()
 

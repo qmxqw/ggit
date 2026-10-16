@@ -91,16 +91,27 @@ class ProjectButton(QAbstractButton):
             return
         if event.buttons() & Qt.MouseButton.LeftButton:
             dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
-            if not self._is_dragging and dist >= 8:
+            if not self._is_dragging and dist >= 5:
                 self._is_dragging = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                nav = self._nav()
+                if nav is not None:
+                    nav._begin_drag(self)
                 self.update()
             if self._is_dragging:
                 nav = self._nav()
                 if nav is not None and getattr(nav, "_box", None) is not None:
-                    # 使用全局坐标映射到 _box，绝对稳定且不受 widget 自身换位的影响
-                    box_x = nav._box.mapFromGlobal(event.globalPosition().toPoint()).x()
-                    nav._handle_drag_move(self, box_x)
+                    global_pt = event.globalPosition().toPoint()
+                    box_pt = nav._box.mapFromGlobal(global_pt)
+                    # 实时跟随鼠标平滑平移，不受网格跳跃限制
+                    btn_x = box_pt.x() - self._drag_start_pos.x()
+                    max_x = max(0, nav._box.width() - self.width())
+                    clamped_x = max(0, min(max_x, btn_x))
+                    self.move(clamped_x, 4)
+                    self.raise_()
+                    # 以按钮中心位置判定当前目标槽位
+                    btn_center_x = clamped_x + ProjectButton.W // 2
+                    nav._handle_drag_move(self, btn_center_x)
                 return
         super().mouseMoveEvent(event)
 
@@ -208,6 +219,17 @@ class ProjectNav(QScrollArea):
             w.setPalette(pal)
         self._buttons: list = []
 
+        # 拖拽占位符：呈现与下方面板多文档一致的实时槽位效果
+        self._placeholder = QWidget(self._box)
+        self._placeholder.setFixedSize(ProjectButton.W, ProjectButton.H)
+        self._placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._placeholder.setStyleSheet(
+            "background: rgba(255, 255, 255, 0.05); "
+            "border: 1px dashed #0e7ad1; "
+            "border-radius: 2px;"
+        )
+        self._placeholder.setVisible(False)
+
         # Tooltip 控制：0 延迟即时显示与瞬间隐藏，彻底干掉等待
         self._tip_timer = QTimer(self)
         self._tip_timer.setSingleShot(True)
@@ -272,11 +294,25 @@ class ProjectNav(QScrollArea):
         if idx >= 0:
             self.selected.emit(idx)
 
+    def _begin_drag(self, btn: ProjectButton) -> None:
+        idx = self.button_index(btn)
+        if idx < 0:
+            return
+        self._hide_tip_now()
+        if self._placeholder.isHidden():
+            self._lay.removeWidget(btn)
+            self._lay.insertWidget(idx, self._placeholder)
+            self._placeholder.show()
+        btn.setVisible(True)
+        btn.raise_()
+
     def _handle_drag_move(self, btn: ProjectButton, box_x: int) -> None:
         self._hide_tip_now()
         cur_idx = self.button_index(btn)
         if cur_idx < 0:
             return
+        if self._placeholder.isHidden():
+            self._begin_drag(btn)
         n = len(self._buttons)
         if n <= 1:
             return
@@ -287,16 +323,29 @@ class ProjectNav(QScrollArea):
         if target_idx != cur_idx:
             self._buttons.remove(btn)
             self._buttons.insert(target_idx, btn)
-            self._lay.removeWidget(btn)
-            self._lay.insertWidget(target_idx, btn)
-            self.ensureWidgetVisible(btn, 20, 0)
+            self._lay.removeWidget(self._placeholder)
+            self._lay.insertWidget(target_idx, self._placeholder)
+            self.ensureWidgetVisible(self._placeholder, 20, 0)
 
     def _handle_drag_release(self, btn: ProjectButton, start_idx: int) -> None:
         cur_idx = self.button_index(btn)
+        if not self._placeholder.isHidden():
+            self._lay.removeWidget(self._placeholder)
+            self._placeholder.hide()
+            if cur_idx >= 0:
+                self._lay.insertWidget(cur_idx, btn)
+            else:
+                self._lay.addWidget(btn)
+        btn.setVisible(True)
+        btn.raise_()
+        self._box.adjustSize()
         if cur_idx >= 0 and cur_idx != start_idx:
             self.reordered.emit(start_idx, cur_idx)
 
     def rebuild(self, count: int) -> None:
+        if hasattr(self, "_placeholder") and not self._placeholder.isHidden():
+            self._lay.removeWidget(self._placeholder)
+            self._placeholder.hide()
         while len(self._buttons) > count:
             b = self._buttons.pop()
             self._lay.removeWidget(b)
