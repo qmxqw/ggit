@@ -70,6 +70,24 @@ class DiffToolsTest(unittest.TestCase):
         rows = build_split([L("hunk", None, None, "@@"), L("ctx", 1, 1, "a")])
         self.assertEqual(len(rows), 1)
 
+    def test_note_lines_survive_trim_and_split(self):
+        # 截断说明 / 分段标题（note）不能在两种显示模式里丢掉
+        lines = numbered(40, {5: "add"}) + [L("note", None, None, "截断了")]
+        out = trim_context(lines, 3)
+        self.assertEqual((out[-1].kind, out[-1].text), ("note", "截断了"))
+        rows = build_split(lines)
+        self.assertEqual(rows[-1].left.text, "截断了")
+        self.assertIs(rows[-1].left, rows[-1].right)
+
+    def test_trim_note_between_sections(self):
+        sec2 = [L("note", None, None, "b/other")] + numbered(20, {15: "del"})
+        out = trim_context(numbered(20, {3: "add"}) + sec2, 3)
+        kinds = [l.kind for l in out]
+        self.assertEqual(kinds.count("hunk"), 2)
+        self.assertEqual(kinds.count("note"), 1)
+        self.assertLess(kinds.index("hunk"), kinds.index("note"))
+        self.assertLess(kinds.index("note"), len(kinds) - 1 - kinds[::-1].index("hunk"))
+
     def test_change_groups(self):
         flags = [(False, False), (True, False), (False, True), (False, False), (False, True), (False, False)]
         self.assertEqual(change_groups(flags), [(1, 2, True, True), (4, 4, False, True)])

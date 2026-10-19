@@ -182,6 +182,14 @@ class DocArea(QWidget):
         for doc in list(self._docs.values()):
             self.load(doc, quiet=True)
 
+    def cancel_all(self) -> None:
+        """取消所有文档正在进行的后台读取（项目被移除时调用）。"""
+        for doc in self._docs.values():
+            if doc.task_id is not None:
+                self.runner.cancel(doc.task_id)
+                doc.task_id = None
+            doc.token += 1
+
     def set_mode(self, mode: str) -> None:
         for doc in self._docs.values():
             doc.view.set_mode(mode)

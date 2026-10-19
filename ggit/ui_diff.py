@@ -288,7 +288,7 @@ class UnifiedView(_CodeView):
                 blocks.append(Blk("+ " + dl.text, theme.ADD_BG, None, ("", _n(dl.new_no)), True))
             elif dl.kind == "del":
                 blocks.append(Blk("- " + dl.text, theme.DEL_BG, None, (_n(dl.old_no), ""), True))
-            elif dl.kind == "hunk":
+            elif dl.kind in ("hunk", "note"):
                 blocks.append(Blk(dl.text, theme.HUNK_BG, theme.HUNK_FG, ("", ""), False))
             else:
                 blocks.append(Blk("  " + dl.text, None, None, (_n(dl.old_no), _n(dl.new_no)), False))
@@ -363,6 +363,11 @@ class SplitView(QWidget):
         lb, rb, flags = [], [], []
         for r in rows:
             a, b = r.left, r.right
+            if a is not None and a.kind == "note":
+                lb.append(Blk(a.text, theme.HUNK_BG, theme.HUNK_FG, ("",), False))
+                rb.append(Blk(a.text, theme.HUNK_BG, theme.HUNK_FG, ("",), False))
+                flags.append((False, False))
+                continue
             if a is None:
                 lb.append(Blk("", FILL_BG, None, ("",), False))
             elif a.kind == "del":
@@ -465,7 +470,9 @@ class DiffDocument(QWidget):
             return self.set_message("没有可显示的差异。\n（内容相同，或差异只是被忽略的空白 / 换行符。）")
         self.fd = fd
         self.stats.setText(f"<span style='color:#73c991'>+{fd.added}</span>&nbsp;&nbsp;"
-                           f"<span style='color:#f14c4c'>−{fd.deleted}</span>")
+                           f"<span style='color:#f14c4c'>−{fd.deleted}</span>"
+                           + ("&nbsp;&nbsp;<span style='color:#e2c08d'>（已截断）</span>"
+                              if fd.truncated else ""))
         self._render(keep_scroll)
 
     def show_result(self, fd, keep_scroll: bool = False) -> None:

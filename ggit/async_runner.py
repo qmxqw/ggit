@@ -117,8 +117,10 @@ class AsyncRunner(QObject):
                     on_err(err)
             elif on_ok:
                 on_ok(res)
-        except RuntimeError:
-            pass        # 回调所属的界面对象已被销毁（比如项目被移除）
+        except RuntimeError as e:
+            if "already deleted" not in str(e):
+                raise   # 真正的程序错误：交给全局异常处理（记日志 + 提示），不要悄悄吞掉
+            # 否则：回调所属的界面对象已被销毁（比如项目被移除），忽略
 
     def shutdown(self):
         for token in list(self._tokens.values()):

@@ -52,6 +52,21 @@ class AsyncRunnerTest(unittest.TestCase):
         runner.shutdown()
         self.assertEqual(results, [42])
 
+    def test_callback_errors(self):
+        runner = AsyncRunner()
+        # 界面对象已销毁：忽略
+        runner._on_finished(1, None, None)
+        runner._callbacks[2] = (lambda r: (_ for _ in ()).throw(
+            RuntimeError("Internal C++ object (QLabel) already deleted.")), None)
+        runner._on_finished(2, "x", None)
+        # 其它 RuntimeError 是真正的程序错误：不能悄悄吞掉
+        def boom(_r):
+            raise RuntimeError("real bug")
+        runner._callbacks[3] = (boom, None)
+        with self.assertRaises(RuntimeError):
+            runner._on_finished(3, "x", None)
+        runner.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()

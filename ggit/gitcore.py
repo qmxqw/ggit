@@ -33,6 +33,7 @@ FULL_CONTEXT = 1_000_000   # diff 一律取整个文件的上下文，界面再�
 MAX_UNTRACKED_BYTES = 5 * 1024 * 1024
 MAX_DIFF_BYTES = 10 * 1024 * 1024
 MAX_DIFF_PARSE_LINES = 30000
+TRUNCATED_NOTE = "… 差异内容过大，已自动截断，后面的内容没有显示"
 
 
 class GitError(Exception):
@@ -228,7 +229,7 @@ class CommitFile:
 
 @dataclass
 class DiffLine:
-    kind: str            # ctx / add / del / hunk
+    kind: str            # ctx / add / del / hunk / note（解析时生成的提示行：分段标题、截断说明）
     old_no: Optional[int]
     new_no: Optional[int]
     text: str
@@ -243,6 +244,7 @@ class FileDiff:
     added: int = 0
     deleted: int = 0
     message: str = ""
+    truncated: bool = False   # 内容过大，只解析了前面一部分
 
 
 @dataclass
@@ -324,8 +326,9 @@ def parse_status(data: bytes) -> RepoStatus:
     return st
 
 
-def get_status(repo: str) -> RepoStatus:
-    out = run_git(repo, ["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"])
+def get_status(repo: str, untracked: str = "all") -> RepoStatus:
+    """untracked：all = 列出未跟踪目录里的每个文件；normal = 未跟踪目录只算一条（快，只看“有没有改动”时用）。"""
+    out = run_git(repo, ["status", "--porcelain=v2", "--branch", "-z", f"--untracked-files={untracked}"])
     st = parse_status(out)
     st.changes.sort(key=lambda c: c.path.lower())
     del st.changes[5000:]
@@ -561,7 +564,7 @@ def parse_diff(data: bytes, encoding: str = ENC_AUTO) -> FileDiff:
             in_hunk = False
             sections += 1
             if sections > 1:
-                fd.lines.append(DiffLine("hunk", None, None,
+                fd.lines.append(DiffLine("note", None, None,
                                          decode_line(raw.split(b" ", 2)[-1], encoding)))
             continue
         if not in_hunk and not raw.startswith(b"@@"):
@@ -619,7 +622,8 @@ def parse_diff(data: bytes, encoding: str = ENC_AUTO) -> FileDiff:
             old_no += 1
             new_no += 1
     if truncated:
-        fd.lines.append(DiffLine("hunk", None, None, "@@ 差异内容过大，已自动截断 @@"))
+        fd.truncated = True
+        fd.lines.append(DiffLine("note", None, None, TRUNCATED_NOTE))
     return fd
 
 
@@ -656,12 +660,17 @@ def _untracked_diff(repo: str, rel: str, encoding: str) -> FileDiff:
     raw_lines = data.split(b"\n")
     if raw_lines and raw_lines[-1] == b"":
         raw_lines.pop()
+    if len(raw_lines) > MAX_DIFF_PARSE_LINES:
+        del raw_lines[MAX_DIFF_PARSE_LINES:]
+        fd.truncated = True
     fd.lines.append(DiffLine("hunk", None, None, f"@@ 新文件（未跟踪）  +1,{len(raw_lines)} @@"))
     for n, raw in enumerate(raw_lines, 1):
         if raw.endswith(b"\r"):
             raw = raw[:-1]
         fd.lines.append(DiffLine("add", None, n, decode_line(raw, encoding)))
     fd.added = len(raw_lines)
+    if fd.truncated:
+        fd.lines.append(DiffLine("note", None, None, TRUNCATED_NOTE))
     return fd
 
 
@@ -684,6 +693,32 @@ def get_worktree_diff(repo: str, change: FileChange, has_head: bool, *,
 # --------------------------------------------------------------------------
 # 文件历史
 # --------------------------------------------------------------------------
+_C_ESCAPES = {ord("a"): 7, ord("b"): 8, ord("t"): 9, ord("n"): 10, ord("v"): 11,
+              ord("f"): 12, ord("r"): 13, ord('"'): 34, ord("\\"): 92}
+
+
+def _unquote_path(raw: bytes) -> bytes:
+    """还原 git 给“特殊”文件名加的 C 风格引号（"a\\tb" / "\\346\\226\\207"）。没加引号的原样返回。"""
+    if len(raw) < 2 or not (raw.startswith(b'"') and raw.endswith(b'"')):
+        return raw
+    s, out, i = raw[1:-1], bytearray(), 0
+    while i < len(s):
+        c = s[i]
+        if c == 92 and i + 1 < len(s):                      # 反斜杠转义
+            n = s[i + 1]
+            octal = s[i + 1:i + 4]
+            if len(octal) == 3 and all(48 <= d <= 55 for d in octal):     # \ooo：一个字节
+                out.append(int(octal, 8) & 0xFF)
+                i += 4
+                continue
+            out.append(_C_ESCAPES.get(n, n))
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return bytes(out)
+
+
 def get_file_history(repo: str, path: str, limit: int = 2000) -> list:
     """某个文件的提交历史（当前分支，追踪重命名；已删除的文件也能查）。"""
     out = run_git(repo, ["log", "--follow", "--decorate=full", "--no-color", "-M",
@@ -698,7 +733,7 @@ def get_file_history(repo: str, path: str, limit: int = 2000) -> list:
             if cur:
                 records.append(cur)
         elif cur is not None and raw.strip():
-            parts = decode_line(raw).rstrip("\r").split("\t")
+            parts = [decode_line(_unquote_path(p)) for p in raw.rstrip(b"\r").split(b"\t")]
             if len(parts) >= 2 and cur[3] is None:
                 cur[1] = parts[0][:1]
                 if parts[0][:1] in "RC" and len(parts) >= 3:

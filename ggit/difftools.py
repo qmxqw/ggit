@@ -14,8 +14,24 @@ from .gitcore import DiffLine
 
 
 def trim_context(lines: list, n: int = 3) -> list:
-    """只保留改动行及其前后各 n 行；每一段前面加 @@ 标题行。没有改动则返回空列表。"""
-    body = [l for l in lines if l.kind != "hunk"]
+    """只保留改动行及其前后各 n 行；每一段前面加 @@ 标题行。没有改动则返回空列表。
+
+    note 行（分段标题、截断说明）原样保留在原来的位置。
+    """
+    out: list = []
+    chunk: list = []
+    for l in lines:
+        if l.kind == "note":
+            out.extend(_trim_chunk(chunk, n))
+            chunk = []
+            out.append(l)
+        elif l.kind != "hunk":
+            chunk.append(l)
+    out.extend(_trim_chunk(chunk, n))
+    return out if any(l.kind in ("add", "del") for l in out) else []
+
+
+def _trim_chunk(body: list, n: int) -> list:
     keep = [False] * len(body)
     changed = False
     for i, l in enumerate(body):
@@ -52,7 +68,8 @@ class SplitRow:
 
 
 def build_split(lines: list) -> list:
-    """左右对照。连续的“删除 + 新增”算一个改动块，逐行配对，短的一侧补空行，保证两侧行数一致。"""
+    """左右对照。连续的“删除 + 新增”算一个改动块，逐行配对，短的一侧补空行，保证两侧行数一致。
+    hunk 标题行丢弃；note 行（分段标题、截断说明）两侧都保留。"""
     rows: list = []
     dels: list = []
     adds: list = []
@@ -71,7 +88,7 @@ def build_split(lines: list) -> list:
             dels.append(l)
         elif l.kind == "add":
             adds.append(l)
-        else:
+        else:                       # ctx，或 note（两侧都显示这句提示）
             flush()
             rows.append(SplitRow(l, l))
     flush()

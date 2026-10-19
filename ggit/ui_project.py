@@ -536,13 +536,13 @@ class ProjectView(QWidget):
         """)
 
     def _refresh_branches(self):
-        if self._branches_loading or not self._alive:
+        if not self._alive:
             return
-        self._branches_loading = True
-        path = self.path
-        if self._branch_task is not None:
+        if self._branch_task is not None:       # 还在读上一次的：作废它，按最新状态重读
             self.runner.cancel(self._branch_task)
             self._branch_task = None
+        self._branches_loading = True
+        path = self.path
         self._branch_task = self.runner.submit(
             lambda: gitcore.get_branches(path),
             self._on_branches_loaded,
@@ -1008,7 +1008,13 @@ class ProjectView(QWidget):
                                 data=abs_path)
 
     def dispose(self):
+        """项目被移除 / 程序退出：取消这个项目所有还在跑的 git 任务。"""
         self._alive = False
-        if self._branch_task is not None:
-            self.runner.cancel(self._branch_task)
-            self._branch_task = None
+        for attr in ("_snap_task", "_graph_task", "_hist_task", "_branch_task"):
+            task = getattr(self, attr)
+            if task is not None:
+                self.runner.cancel(task)
+                setattr(self, attr, None)
+        self.docs.cancel_all()
+        if self.file_docs is not None:
+            self.file_docs.cancel_all()

@@ -303,6 +303,43 @@ class ParseTest(unittest.TestCase):
         fd = gitcore.parse_diff(huge_data)
         self.assertTrue(any("已自动截断" in (l.text or "") for l in fd.lines))
         self.assertLessEqual(len(fd.lines), gitcore.MAX_DIFF_PARSE_LINES + 2)
+        self.assertTrue(fd.truncated)
+        self.assertEqual((fd.lines[-1].kind, fd.lines[-1].text), ("note", gitcore.TRUNCATED_NOTE))
+
+    def test_untracked_file_truncation(self):
+        d = tempfile.mkdtemp()
+        try:
+            write(d, "big.txt", "x\n" * 50)
+            old = gitcore.MAX_DIFF_PARSE_LINES
+            gitcore.MAX_DIFF_PARSE_LINES = 10
+            try:
+                fd = gitcore._untracked_diff(d, "big.txt", gitcore.ENC_AUTO)
+            finally:
+                gitcore.MAX_DIFF_PARSE_LINES = old
+            self.assertTrue(fd.truncated)
+            self.assertEqual(fd.added, 10)
+            self.assertEqual(fd.lines[-1].kind, "note")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_unquote_path(self):
+        u = gitcore._unquote_path
+        self.assertEqual(u(b"plain.txt"), b"plain.txt")
+        self.assertEqual(u(b'"a\\tb\\"c\\\\d"'), b'a\tb"c\\d')
+        self.assertEqual(u('"\\346\\226\\207.txt"'.encode()), "文.txt".encode())
+        self.assertEqual(u(b'"'), b'"')
+
+    def test_status_untracked_modes(self):
+        d = tempfile.mkdtemp()
+        try:
+            git(d, "init", "-q", "-b", "main")
+            os.makedirs(os.path.join(d, "sub"))
+            write(d, "sub/x.txt", "1\n")
+            write(d, "sub/y.txt", "2\n")
+            self.assertEqual(len(gitcore.get_status(d).changes), 2)
+            self.assertEqual([c.path for c in gitcore.get_status(d, untracked="normal").changes], ["sub/"])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
     def test_graph_linear_and_branches(self):
         lay = GraphLayout()

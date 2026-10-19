@@ -12,19 +12,28 @@ import time
 from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
-                               QMainWindow, QMenu, QMessageBox, QStackedWidget, QSystemTrayIcon,
+                               QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QStackedWidget,
+                               QSystemTrayIcon,
                                QToolButton, QVBoxLayout, QWidget)
 
 from . import __version__, config, gitcore, winhotkey
 from .async_runner import AsyncRunner
 from .icon import app_icon
-from .options import ViewOptions
+from .options import FONT_DEFAULT, FONT_MAX, FONT_MIN, ViewOptions
 from .ui_dialogs import PickerDialog
 from .ui_diff import MODE_SPLIT, MODE_UNIFIED
 from .ui_nav import ProjectNav
 from .ui_project import ProjectView
 
 MAX_TABS = 10
+
+
+def _inside_code_view(w: QWidget) -> bool:
+    while w is not None:
+        if isinstance(w, QPlainTextEdit):
+            return True
+        w = w.parentWidget()
+    return False
 
 
 class ProjectEntry:
@@ -63,6 +72,7 @@ class MainWindow(QMainWindow):
         self.projects: list = []
         self.views: dict = {}          # 路径 -> ProjectView
         self.badges: dict = {}         # 路径 -> Badge
+        self._badge_gen: dict = {}     # 路径 -> 最近一次标签状态读取的序号（丢弃过期结果）
         self.current = -1
         self._last_badge_refresh = 0.0
         self._quitting = False
@@ -82,10 +92,10 @@ class MainWindow(QMainWindow):
                 self.options.diff_mode = opts["diff_mode"]
             if opts.get("work_mode") in ("git", "file"):
                 self.options.work_mode = opts["work_mode"]
-            if isinstance(opts.get("font_size"), int) and 6 <= opts["font_size"] <= 28:
-                self.options.font_size = opts["font_size"]
+            if isinstance(opts.get("font_size"), int):
+                self.options.font_size = max(FONT_MIN, min(FONT_MAX, opts["font_size"]))
 
-        if self.options.font_size != 9:
+        if self.options.font_size != FONT_DEFAULT:
             self._apply_font_size(self.options.font_size)
 
         self._build_ui()
@@ -483,6 +493,7 @@ class MainWindow(QMainWindow):
             self.badges[view.path] = badge_from_status(view.snap.status)
         else:
             return
+        self._badge_gen[view.path] = self._badge_gen.get(view.path, 0) + 1    # 作废还没回来的旧标签读取
         self._update_button(self._index_of(view.path))
 
     def _refresh_badges(self, force: bool = False):
@@ -496,11 +507,15 @@ class MainWindow(QMainWindow):
             if e.path == cur and e.path in self.views:
                 continue                # 当前项目由它自己的页面刷新
             path = e.path
-            self.runner.submit(lambda p=path: gitcore.get_status(p),
-                               lambda st, p=path: self._on_badge(p, badge_from_status(st)),
-                               lambda err, p=path: self._on_badge(p, Badge(error=True)))
+            gen = self._badge_gen[path] = self._badge_gen.get(path, 0) + 1
+            # 标签上只需要知道“有没有改动”，未跟踪目录不必逐个文件展开
+            self.runner.submit(lambda p=path: gitcore.get_status(p, untracked="normal"),
+                               lambda st, p=path, g=gen: self._on_badge(p, g, badge_from_status(st)),
+                               lambda err, p=path, g=gen: self._on_badge(p, g, Badge(error=True)))
 
-    def _on_badge(self, path, badge):
+    def _on_badge(self, path, gen, badge):
+        if self._badge_gen.get(path) != gen:
+            return                      # 已经有更新的结果（更晚的一次读取，或项目页面自己刷新过）
         self.badges[path] = badge
         self._update_button(self._index_of(path))
 
@@ -571,7 +586,7 @@ class MainWindow(QMainWindow):
 
     # ================================================================== 字体缩放
     def change_font_size(self, delta: int) -> None:
-        new_size = max(7, min(24, self.options.font_size + delta))
+        new_size = max(FONT_MIN, min(FONT_MAX, self.options.font_size + delta))
         if new_size == self.options.font_size:
             return
         self.options.font_size = new_size
@@ -580,39 +595,32 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"全局字体大小已调整为: {new_size} pt (按 Ctrl +/- 调节)", 2500)
 
     def reset_font_size(self) -> None:
-        if self.options.font_size == 9:
+        if self.options.font_size == FONT_DEFAULT:
             return
-        self.options.font_size = 9
-        self._apply_font_size(9)
+        self.options.font_size = FONT_DEFAULT
+        self._apply_font_size(FONT_DEFAULT)
         self._save_config()
-        self.statusBar().showMessage("全局字体大小已恢复为默认 (9 pt)", 2500)
+        self.statusBar().showMessage(f"全局字体大小已恢复为默认 ({FONT_DEFAULT} pt)", 2500)
 
     def _apply_font_size(self, size: int) -> None:
+        # 1. 改全局字体：没有单独设置过字体的控件会自动跟着变
         app = QApplication.instance()
         if app is not None:
             f = app.font()
             f.setPointSize(size)
             app.setFont(f)
 
-        # 1. 全局与全部子控件级联应用新字号
-        font = self.font()
-        font.setPointSize(size)
-        self.setFont(font)
+        # 2. 单独设置过字体的控件（比如加粗的区块标题）：只改字号，保留粗体等其它属性。
+        #    代码视图（及其内部控件）用等宽字体，由下面的 apply_font_size 单独处理。
         for w in self.findChildren(QWidget):
-            from PySide6.QtWidgets import QPlainTextEdit
-            if isinstance(w, QPlainTextEdit):
+            if not w.testAttribute(Qt.WidgetAttribute.WA_SetFont) or _inside_code_view(w):
                 continue
-            w.setFont(font)
-            w.update()
-
-        # 2. 顶部导航
-        if hasattr(self, "nav"):
-            self.nav.setFont(font)
-            self.nav.update()
+            wf = w.font()
+            wf.setPointSize(size)
+            w.setFont(wf)
 
         # 3. 项目视图与提交树、更改列表
         for view in self.views.values():
-            view.setFont(font)
             if hasattr(view, "model"):
                 view.model.layoutChanged.emit()
             if hasattr(view, "graph"):

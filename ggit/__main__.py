@@ -16,6 +16,17 @@ def _set_app_id() -> None:
             pass
 
 
+def _user_tag() -> str:
+    """当前用户的短标识（用户名的哈希：中文用户名也不会互相撞上）。"""
+    import getpass
+    import hashlib
+    try:
+        user = getpass.getuser()
+    except Exception:      # noqa: BLE001
+        user = ""
+    return hashlib.sha1(user.encode("utf-8", "replace")).hexdigest()[:12]
+
+
 def _install_excepthook() -> None:
     """未捕获异常时记录日志并弹出提示，避免静默闪退。"""
     def _hook(exc_type, exc_value, exc_tb):
@@ -69,7 +80,8 @@ def main() -> int:
     QApplication.setEffectEnabled(Qt.UIEffect.UI_FadeTooltip, False)
 
     # ---- 单实例：已经有一个在运行，就通知它显示出来，然后退出 ----
-    name = "ggit-single-instance"
+    # Windows 的命名管道是整台机器共用的：名字里带上用户名，多个用户同时登录时互不干扰
+    name = "ggit-single-instance-" + _user_tag()
     sock = QLocalSocket()
     sock.connectToServer(name)
     if sock.waitForConnected(300):

@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QPainter
+from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import QAbstractButton, QHBoxLayout, QScrollArea, QToolTip, QWidget
 
 
@@ -230,41 +230,17 @@ class ProjectNav(QScrollArea):
         )
         self._placeholder.setVisible(False)
 
-        # Tooltip 控制：0 延迟即时显示与瞬间隐藏，彻底干掉等待
-        self._tip_timer = QTimer(self)
-        self._tip_timer.setSingleShot(True)
-        self._tip_timer.timeout.connect(self._on_tip_timeout)
-
-        self._tip_leave_timer = QTimer(self)
-        self._tip_leave_timer.setSingleShot(True)
-        self._tip_leave_timer.timeout.connect(self._on_tip_leave_timeout)
-
+        # Tooltip：鼠标移入立即显示，移出立即隐藏（不用 Qt 自带的延迟提示）
         self._hovered_btn: Optional[ProjectButton] = None
         self._active_tip_btn: Optional[ProjectButton] = None
 
     def _on_button_enter(self, btn: ProjectButton) -> None:
-        if self._tip_leave_timer.isActive():
-            self._tip_leave_timer.stop()
-        if self._tip_timer.isActive():
-            self._tip_timer.stop()
         self._hovered_btn = btn
-        if not getattr(btn, "tip", None):
-            return
-        # 0 等待即时秒弹
         self._show_tip(btn)
 
     def _on_button_leave(self, btn: ProjectButton) -> None:
         if self._hovered_btn == btn:
             self._hovered_btn = None
-            # 鼠标移出立即瞬间隐藏，无残留等待
-            self._hide_tip_now()
-
-    def _on_tip_timeout(self) -> None:
-        if self._hovered_btn is not None and getattr(self._hovered_btn, "tip", None):
-            self._show_tip(self._hovered_btn)
-
-    def _on_tip_leave_timeout(self) -> None:
-        if self._hovered_btn is None:
             self._hide_tip_now()
 
     def _show_tip(self, btn: ProjectButton) -> None:
@@ -279,10 +255,6 @@ class ProjectNav(QScrollArea):
         self._active_tip_btn = btn
 
     def _hide_tip_now(self) -> None:
-        if self._tip_timer.isActive():
-            self._tip_timer.stop()
-        if self._tip_leave_timer.isActive():
-            self._tip_leave_timer.stop()
         self._active_tip_btn = None
         QToolTip.hideText()
 
@@ -338,7 +310,6 @@ class ProjectNav(QScrollArea):
                 self._lay.addWidget(btn)
         btn.setVisible(True)
         btn.raise_()
-        self._box.adjustSize()
         if cur_idx >= 0 and cur_idx != start_idx:
             self.reordered.emit(start_idx, cur_idx)
 
