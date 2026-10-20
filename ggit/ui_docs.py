@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -27,7 +28,11 @@ class Doc:
     data: object = None
     token: int = 0                 # 每次加载 +1，用来丢弃过期的结果
     sig: object = None             # 上次显示内容的签名：自动刷新时内容没变就不重绘
-    task_id: Optional[int] = None  # 正在运行的后台任务 ID
+    task_id: Optional[int] = None  # 正在运行的后台任务 ID（读完后清空）
+    loaded_at: float = 0.0         # 最近一次读取完成的时间（time.monotonic）
+
+
+RELOAD_GAP = 1.0                   # 再次打开同一个文档时，距上次读取不到这么久就不重读（比如双击）
 
 
 class DocTabBar(QTabBar):
@@ -58,7 +63,6 @@ class DocArea(QWidget):
         lay.setSpacing(0)
         self.bar_frame = QFrame()
         self.bar_frame.setObjectName("docBar")
-        self.bar_frame.setStyleSheet("QFrame#docBar{background:#2d2d30;}")
         bl = QHBoxLayout(self.bar_frame)
         bl.setContentsMargins(4, 4, 4, 0)
         self.tabbar = DocTabBar()
@@ -78,7 +82,7 @@ class DocArea(QWidget):
         self.stack = QStackedWidget()
         self.empty = QLabel(empty_text)
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty.setStyleSheet("color:#8a8a8a; font-size:13px;")
+        self.empty.setObjectName("placeholder")
         self.stack.addWidget(self.empty)
         lay.addWidget(self.stack, 1)
 
@@ -106,6 +110,9 @@ class DocArea(QWidget):
     def get(self, key: str) -> Optional[Doc]:
         return self._docs.get(key)
 
+    def all_docs(self) -> list:
+        return list(self._docs.values())
+
     def docs_of_kind(self, kind: str) -> list:
         return [d for d in self._docs.values() if d.kind == kind]
 
@@ -120,7 +127,7 @@ class DocArea(QWidget):
             if fn is not None:
                 doc.fn = fn
             doc.info = info
-            if kind in ("work", "file") or doc.sig is None:     # 磁盘上的内容会变；没加载成功的也重试
+            if self._needs_reload(doc):
                 self.load(doc, quiet=True)
             i = self._index_of(key)
             self.tabbar.setCurrentIndex(i)
@@ -143,6 +150,17 @@ class DocArea(QWidget):
         return doc
 
     # ------------------------------------------------------------ 加载
+    @staticmethod
+    def _needs_reload(doc: Doc) -> bool:
+        """已经打开的文档被再次打开时要不要重读。
+
+        正在读、或刚读完（双击会连着触发两次打开）：不重读；
+        没读成功过的：重读；工作区 / 磁盘文件：内容可能变了，重读；提交里的文件：永远不变，不重读。
+        """
+        if doc.task_id is not None or time.monotonic() - doc.loaded_at < RELOAD_GAP:
+            return False
+        return doc.sig is None or doc.kind in ("work", "file")
+
     def load(self, doc: Doc, quiet: bool) -> None:
         """在后台读取内容并显示。quiet=True（自动刷新）：不显示“加载中”，内容没变就不重绘，保持滚动位置。"""
         if doc.fn is None:
@@ -167,6 +185,8 @@ class DocArea(QWidget):
     def _on_loaded(self, doc: Doc, tok: int, result, quiet: bool) -> None:
         if not self._alive(doc, tok):
             return
+        doc.task_id = None
+        doc.loaded_at = time.monotonic()
         sig = doc.view.result_signature(result)
         if quiet and sig == doc.sig:
             return
@@ -175,6 +195,8 @@ class DocArea(QWidget):
 
     def _on_error(self, doc: Doc, tok: int, err) -> None:
         if self._alive(doc, tok):
+            doc.task_id = None
+            doc.sig = None                  # 再次打开时重试
             doc.view.set_message(f"出错了：{err}")
 
     def reload_all(self) -> None:

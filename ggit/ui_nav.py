@@ -199,6 +199,7 @@ class ProjectButton(QAbstractButton):
 class ProjectNav(QScrollArea):
     selected = Signal(int)
     reordered = Signal(int, int)
+    dragFinished = Signal()             # 拖动结束（不管位置有没有变）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -223,11 +224,8 @@ class ProjectNav(QScrollArea):
         self._placeholder = QWidget(self._box)
         self._placeholder.setFixedSize(ProjectButton.W, ProjectButton.H)
         self._placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._placeholder.setStyleSheet(
-            "background: rgba(255, 255, 255, 0.05); "
-            "border: 1px dashed #0e7ad1; "
-            "border-radius: 2px;"
-        )
+        self._placeholder.setObjectName("dragPlaceholder")         # 样式见 theme.py
+        self._placeholder.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._placeholder.setVisible(False)
 
         # Tooltip：鼠标移入立即显示，移出立即隐藏（不用 Qt 自带的延迟提示）
@@ -312,6 +310,12 @@ class ProjectNav(QScrollArea):
         btn.raise_()
         if cur_idx >= 0 and cur_idx != start_idx:
             self.reordered.emit(start_idx, cur_idx)
+        self.dragFinished.emit()
+
+    @property
+    def dragging(self) -> bool:
+        """正在拖动某个标签：按钮顺序和项目列表暂时对不上，别去更新按钮上的内容。"""
+        return not self._placeholder.isHidden()
 
     def rebuild(self, count: int) -> None:
         if hasattr(self, "_placeholder") and not self._placeholder.isHidden():

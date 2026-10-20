@@ -29,7 +29,8 @@ def load() -> dict:
         return {}
 
 
-def save(data: dict) -> None:
+def save(data: dict) -> str:
+    """保存配置。成功返回空串，失败返回原因（界面负责提示用户）。"""
     path = config_path()
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -37,5 +38,6 @@ def save(data: dict) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, path)       # 原子替换，避免写到一半崩溃留下坏文件
-    except OSError:
-        pass
+        return ""
+    except OSError as e:
+        return str(e)

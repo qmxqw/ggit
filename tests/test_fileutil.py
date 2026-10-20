@@ -61,16 +61,6 @@ class FileUtilTest(unittest.TestCase):
         self.assertTrue(all(len(l) == 99 for l in fc.lines))       # 被截断的半行已丢弃
         self.assertLessEqual(len(fc.lines), fileutil.MAX_PREVIEW_BYTES // 100)
 
-    def test_walk_files(self):
-        self.w("a.txt", "1")
-        self.w("src/b.py", "2")
-        self.w("src/deep/c.py", "3")
-        self.w(".git/config", "x")
-        self.w(".gitignore", "y")
-        self.assertEqual(fileutil.walk_files(self.tmp),
-                         [".gitignore", "a.txt", "src/b.py", "src/deep/c.py"])
-        self.assertEqual(len(fileutil.walk_files(self.tmp, limit=2)), 2)
-
 
 if __name__ == "__main__":
     unittest.main()

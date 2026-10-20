@@ -1,12 +1,15 @@
 """测试分支下拉菜单及顶部项目按钮排版。"""
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
+from ggit import config, theme
 from ggit.async_runner import AsyncRunner
 from ggit.gitcore import BranchInfo, SCOPE_ALL
 from ggit.ui_nav import ProjectButton
@@ -18,10 +21,16 @@ class UIBranchMenuTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication(sys.argv)
         cls.runner = AsyncRunner()
+        # 用临时配置文件：创建 MainWindow 时会读写配置，不能碰到用户真实的 %APPDATA%\ggit\config.json
+        cls.cfg_dir = tempfile.mkdtemp()
+        cls._orig_config_path = config.config_path
+        config.config_path = lambda: os.path.join(cls.cfg_dir, "config.json")
 
     @classmethod
     def tearDownClass(cls):
         cls.runner.shutdown()
+        config.config_path = cls._orig_config_path
+        shutil.rmtree(cls.cfg_dir, ignore_errors=True)
 
     def test_project_button_paint_and_margins(self):
         btn = ProjectButton()
@@ -110,6 +119,7 @@ class UIBranchMenuTest(unittest.TestCase):
         nav._handle_drag_release(b0, start_idx=0)
         self.assertEqual(events, [(0, 2)])
         self.assertTrue(nav._placeholder.isHidden())
+        self.assertFalse(nav.dragging)
         self.assertEqual(nav._lay.indexOf(b0), 2)
 
         nav.deleteLater()
@@ -117,8 +127,9 @@ class UIBranchMenuTest(unittest.TestCase):
     def test_shortcuts_and_more_btn(self):
         from ggit.ui_main import MainWindow
         win = MainWindow()
-        # 验证更多按钮没有原生重复三角 (image: none)
-        self.assertIn("image: none", win.more_btn.styleSheet())
+        # 验证更多按钮没有原生重复三角：它在 topBar 里，全局样式表把 topBar 里按钮的三角去掉了
+        self.assertEqual(win.more_btn.parentWidget().objectName(), "topBar")
+        self.assertIn("QFrame#topBar QToolButton::menu-indicator { image: none", theme._STYLE)
 
         # 验证菜单热键
         acts = win.findChildren(type(win.findChild(object, "")))

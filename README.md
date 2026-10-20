@@ -69,6 +69,10 @@ python -m ggit
   带行号；UTF-8 / GBK 自动识别（“查看 → 文件编码”可强制指定）；超过 3MB 只显示开头，二进制文件不预览。
   打开着的文件会跟着磁盘上的修改自动更新（窗口重新激活或按 `F5` 时）。
 - **更改**：工作区和暂存区里未提交的文件（`M` 修改、`A` 新增、`D` 删除、`R` 重命名、`U` 未跟踪、`C` 冲突）。
+  超过 5000 个时只列出按路径排序后的前 5000 个，标题上会写明总数。
+- **搜索文件（`Ctrl+F`）**：只列出 Git 管理的文件；file 模式下再加上未被 `.gitignore` 忽略的新文件，
+  `node_modules`、`build` 这类被忽略的目录不会出现在列表里（文件树里照样可以浏览）。
+- **分支很多时**：提交图的分支线超过 10 条会自动压窄列宽，每条线仍然单独占一列；超过 28 条才挤在最右一列。
 - **diff 两种模式**
   - 上下合并：只显示改动处及前后 3 行，红底 = 删除，绿底 = 新增。
   - 左右对照：左边修改前、右边修改后，显示整个文件；改动块两侧逐行对齐，短的一侧补灰色空行，两边同步滚动。
@@ -108,7 +112,8 @@ python tools/make_icon.py
 
 ## 测试
 
-核心层（`gitcore`、`graph`、`difftools`、`items`、`fileutil`）不依赖界面库，用真实的临时 Git 仓库做测试：
+核心层（`gitcore`、`cancel`、`graph`、`difftools`、`items`、`fileutil`）不依赖界面库，用真实的临时 Git 仓库做测试；
+界面层的测试用 Qt 的 offscreen 平台运行，读写的是临时配置文件，不会碰到 `%APPDATA%\ggit\config.json`：
 
 ```bat
 python -m unittest discover -s tests -v
@@ -119,7 +124,7 @@ python -m unittest discover -s tests -v
 ```
 ggit/
   gitcore.py      调用 git、解码（UTF-8/GBK）、解析 status / log / diff / 文件历史 / 分支列表
-  fileutil.py     file 模式：读取文本文件做预览、遍历项目文件
+  fileutil.py     file 模式：读取文本文件做预览
   graph.py        提交图的分支线布局算法
   difftools.py    diff 加工：裁剪成“只看改动处”、左右对照对齐、改动分段
   items.py        提交图列表条目（提交行 + 展开的文件行）
@@ -134,7 +139,9 @@ ggit/
   winhotkey.py    Windows 全局热键与“置顶显示”
   icon.py / icon_data.py   程序图标（内嵌）
   async_runner.py 后台线程执行 git，结果回到界面线程
-  theme.py / config.py / options.py / utils.py
+  cancel.py       取消后台 git 任务（不依赖界面库，gitcore 用它结束子进程）
+  theme.py        深色主题、颜色，以及全部界面样式表（按控件 objectName 匹配）
+  config.py / options.py / utils.py
 tools/make_icon.py
 tests/
 ```

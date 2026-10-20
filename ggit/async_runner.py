@@ -1,46 +1,13 @@
 """把耗时的 git 调用放到后台线程，结果回到界面线程的回调里。支持主动取消任务并终止子进程。"""
 from __future__ import annotations
 
-import threading
 from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
 
+from .cancel import CancellationToken, GitCancelledError, set_current_cancel_token
 
-class GitCancelledError(Exception):
-    """任务被主动取消。"""
-
-
-_thread_local = threading.local()
-
-
-def get_current_cancel_token() -> Optional[CancellationToken]:
-    return getattr(_thread_local, "token", None)
-
-
-class CancellationToken:
-    def __init__(self):
-        self.cancelled = False
-        self.proc = None
-        self._lock = threading.Lock()
-
-    def set_proc(self, proc):
-        with self._lock:
-            self.proc = proc
-            if self.cancelled and proc and proc.poll() is None:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-
-    def cancel(self):
-        with self._lock:
-            self.cancelled = True
-            if self.proc and self.proc.poll() is None:
-                try:
-                    self.proc.kill()
-                except OSError:
-                    pass
+__all__ = ["AsyncRunner", "CancellationToken", "GitCancelledError"]
 
 
 class _Signals(QObject):
@@ -58,7 +25,7 @@ class _Job(QRunnable):
     def run(self):
         if self.cancel_token.cancelled:
             return
-        _thread_local.token = self.cancel_token
+        set_current_cancel_token(self.cancel_token)
         try:
             try:
                 res, err = self.fn(), None
@@ -72,7 +39,7 @@ class _Job(QRunnable):
                 except RuntimeError:
                     pass
         finally:
-            _thread_local.token = None
+            set_current_cancel_token(None)
 
 
 class AsyncRunner(QObject):

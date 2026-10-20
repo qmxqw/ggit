@@ -21,6 +21,18 @@ class GraphRow:
     width: int = 1           # 这一行用到的列数
 
 
+def lane_metrics(lanes: int, lane_w: float, max_w: float, min_w: float) -> tuple:
+    """分支线太多时压缩列宽，尽量让每条线都有自己的一列。
+
+    返回 (每列宽度, 能画出的列数)。列数正常时用 lane_w；放不下 max_w 时把列宽压窄，
+    但不窄于 min_w；再多的线才挤到最后一列。
+    """
+    lanes = max(1, lanes)
+    w = min(lane_w, max(min_w, max_w / lanes))
+    cols = min(lanes, max(1, int(max_w // w)))
+    return w, cols
+
+
 class GraphLayout:
     def __init__(self) -> None:
         self.lanes: list = []      # 每一列：(正在等待的提交 id, 颜色) 或 None

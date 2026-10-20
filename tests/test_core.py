@@ -329,6 +329,60 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(u('"\\346\\226\\207.txt"'.encode()), "文.txt".encode())
         self.assertEqual(u(b'"'), b'"')
 
+    def test_gitcore_does_not_need_qt(self):
+        root = os.path.join(os.path.dirname(__file__), "..")
+        out = subprocess.check_output(
+            [sys.executable, "-c",
+             "import sys, ggit.gitcore, ggit.graph, ggit.difftools, ggit.fileutil, ggit.items;"
+             "print(any(m.startswith('PySide6') for m in sys.modules))"], cwd=root)
+        self.assertEqual(out.decode().strip(), "False")
+
+    def test_status_total_changes(self):
+        d = tempfile.mkdtemp()
+        try:
+            git(d, "init", "-q", "-b", "main")
+            for i in range(5):
+                write(d, f"f{i}.txt", "x\n")
+            old = gitcore.MAX_CHANGES
+            gitcore.MAX_CHANGES = 3
+            try:
+                st = gitcore.get_status(d)
+            finally:
+                gitcore.MAX_CHANGES = old
+            self.assertEqual((len(st.changes), st.total_changes), (3, 5))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_list_files_with_untracked(self):
+        d = tempfile.mkdtemp()
+        try:
+            git(d, "init", "-q", "-b", "main")
+            write(d, ".gitignore", "build/\n")
+            write(d, "a.txt", "1\n")
+            commit(d, "c1")
+            write(d, "new.txt", "2\n")
+            os.makedirs(os.path.join(d, "build"))
+            write(d, "build/out.bin", "3\n")
+            self.assertEqual(gitcore.list_files(d), [".gitignore", "a.txt"])
+            self.assertEqual(gitcore.list_files(d, untracked=True), [".gitignore", "a.txt", "new.txt"])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_config_save_reports_error(self):
+        from ggit import config
+        d = tempfile.mkdtemp()
+        orig = config.config_path
+        try:
+            write(d, "blocker", "x")                 # 父目录位置被一个文件占了：一定写不进去
+            config.config_path = lambda: os.path.join(d, "blocker", "config.json")
+            self.assertNotEqual(config.save({"a": 1}), "")
+            config.config_path = lambda: os.path.join(d, "ok", "config.json")
+            self.assertEqual(config.save({"a": 1}), "")
+            self.assertEqual(config.load(), {"a": 1})
+        finally:
+            config.config_path = orig
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_status_untracked_modes(self):
         d = tempfile.mkdtemp()
         try:
@@ -340,6 +394,13 @@ class ParseTest(unittest.TestCase):
             self.assertEqual([c.path for c in gitcore.get_status(d, untracked="normal").changes], ["sub/"])
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+    def test_lane_metrics(self):
+        from ggit.graph import lane_metrics
+        self.assertEqual(lane_metrics(3, 14, 140, 5), (14, 3))        # 线少：正常列宽
+        self.assertEqual(lane_metrics(10, 14, 140, 5), (14, 10))
+        self.assertEqual(lane_metrics(20, 14, 140, 5), (7, 20))       # 线多：压窄，每条仍有一列
+        self.assertEqual(lane_metrics(40, 14, 140, 5), (5, 28))       # 压到最窄后，再多的挤到最后一列
 
     def test_graph_linear_and_branches(self):
         lay = GraphLayout()

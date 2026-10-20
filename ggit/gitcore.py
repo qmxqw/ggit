@@ -18,6 +18,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .cancel import GitCancelledError, get_current_cancel_token
+
 IS_WIN = sys.platform == "win32"
 _NO_WINDOW = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW
 
@@ -30,7 +32,8 @@ SCOPE_ALL = "all"    # 所有本地分支、远端分支、标签
 
 LOG_PAGE = 500
 FULL_CONTEXT = 1_000_000   # diff 一律取整个文件的上下文，界面再按需裁剪成“只看改动处”
-MAX_UNTRACKED_BYTES = 5 * 1024 * 1024
+MAX_CHANGES = 5000         # “更改”列表最多显示这么多个文件
+MAX_UNTRACKED_BYTES =5 * 1024 * 1024
 MAX_DIFF_BYTES = 10 * 1024 * 1024
 MAX_DIFF_PARSE_LINES = 30000
 TRUNCATED_NOTE = "… 差异内容过大，已自动截断，后面的内容没有显示"
@@ -86,7 +89,6 @@ def decode_line(raw: bytes, encoding: str = ENC_AUTO) -> str:
 
 
 def run_git(repo: str, args: list[str], *, check: bool = True, timeout: int = 120) -> bytes:
-    from .async_runner import GitCancelledError, get_current_cancel_token
     cancel_token = get_current_cancel_token()
     if cancel_token and cancel_token.cancelled:
         raise GitCancelledError("操作已取消")
@@ -185,6 +187,7 @@ class RepoStatus:
     ahead: int = 0
     behind: int = 0
     changes: list = field(default_factory=list)
+    total_changes: int = 0             # 改动文件的真实总数（changes 最多只保留 MAX_CHANGES 个）
     last_fetch: Optional[float] = None
 
     @property
@@ -331,7 +334,8 @@ def get_status(repo: str, untracked: str = "all") -> RepoStatus:
     out = run_git(repo, ["status", "--porcelain=v2", "--branch", "-z", f"--untracked-files={untracked}"])
     st = parse_status(out)
     st.changes.sort(key=lambda c: c.path.lower())
-    del st.changes[5000:]
+    st.total_changes = len(st.changes)
+    del st.changes[MAX_CHANGES:]
     st.last_fetch = _last_fetch_time(repo)
     return st
 
@@ -749,6 +753,10 @@ def get_file_history(repo: str, path: str, limit: int = 2000) -> list:
     return entries
 
 
-def list_files(repo: str) -> list:
-    out = run_git(repo, ["ls-files", "-z"])
-    return [decode_line(t) for t in out.split(b"\0") if t]
+def list_files(repo: str, untracked: bool = False) -> list:
+    """仓库里的文件（相对路径）。untracked=True 时再加上没被 .gitignore 忽略的未跟踪文件。"""
+    args = ["ls-files", "-z", "--cached"]
+    if untracked:
+        args += ["--others", "--exclude-standard"]
+    out = run_git(repo, args)
+    return sorted({decode_line(t) for t in out.split(b"\0") if t})

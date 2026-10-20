@@ -1,4 +1,4 @@
-"""文件模式用到的纯 Python 工具：读取文本文件做预览、遍历项目里的文件。不依赖界面库。"""
+"""文件模式用到的纯 Python 工具：读取文本文件做预览。不依赖界面库。"""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from .gitcore import ENC_AUTO, decode_line
 
 MAX_PREVIEW_BYTES = 3 * 1024 * 1024      # 预览最多读这么多，更大的文件只显示开头
-SKIP_DIRS = {".git"}
 
 
 @dataclass
@@ -70,17 +69,3 @@ def read_text_file(path: str, encoding: str = ENC_AUTO) -> FileContent:
     fc.lines = [decode_line(l[:-1] if l.endswith(b"\r") else l, encoding) for l in raw_lines]
     fc.encoding = _encoding_label(data, encoding)
     return fc
-
-
-def walk_files(root: str, limit: int = 50000) -> list:
-    """项目里的所有文件（相对路径，用 / 分隔，已排序）；不进入 .git。最多返回 limit 个。"""
-    out: list = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
-        rel_dir = os.path.relpath(dirpath, root)
-        for name in sorted(filenames):
-            rel = name if rel_dir == "." else f"{rel_dir}/{name}".replace("\\", "/")
-            out.append(rel)
-            if len(out) >= limit:
-                return out
-    return out

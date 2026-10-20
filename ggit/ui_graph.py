@@ -12,13 +12,15 @@ from PySide6.QtWidgets import (QAbstractItemView, QFrame, QListView, QStyle,
 
 from . import theme
 from .gitcore import Commit
+from .graph import lane_metrics
 from .items import FileRow, ItemList
 from .utils import STATUS_COLORS, fmt_time
 
 ROW_H = 26
 LANE_W = 14
 PAD = 8
-MAX_LANES = 10      # 最多画这么多列，再多的挤在最后一列
+GRAPH_MAX_W = 10 * LANE_W   # 分支线区域最宽这么多；线多时压窄列宽
+MIN_LANE_W = 5              # 列宽最窄压到这么多，再多的线才挤在最后一列
 FILE_INDENT = 22    # 文件行相对提交说明再缩进多少
 
 
@@ -150,6 +152,11 @@ class CommitModel(QAbstractListModel):
 
 
 class CommitDelegate(QStyledItemDelegate):
+    _lw = float(LANE_W)          # 当前的列宽（线多时会被压窄）
+
+    def _pen_w(self) -> float:
+        return 2.0 if self._lw >= 8 else 1.5
+
     def sizeHint(self, option, index):
         fm = option.fontMetrics
         h = max(24, fm.height() + 8)
@@ -178,10 +185,13 @@ class CommitDelegate(QStyledItemDelegate):
         mid = top + rect.height() / 2.0
         bot = float(rect.bottom() + 1)
 
-        def lx(c):
-            return rect.left() + PAD + min(c, MAX_LANES - 1) * LANE_W + LANE_W / 2.0
+        lw, cols = lane_metrics(model.lanes, LANE_W, GRAPH_MAX_W, MIN_LANE_W)
+        self._lw = lw
 
-        text_x = rect.left() + PAD * 2 + min(model.lanes, MAX_LANES) * LANE_W + 2
+        def lx(c):
+            return rect.left() + PAD + min(c, cols - 1) * lw + lw / 2.0
+
+        text_x = rect.left() + PAD * 2 + cols * lw + 2
         text_pen = palette.color(QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text)
 
         if isinstance(item, FileRow):
@@ -199,7 +209,7 @@ class CommitDelegate(QStyledItemDelegate):
             if b in seen:
                 continue
             seen.add(b)
-            painter.setPen(QPen(theme.lane_color(color), 2))
+            painter.setPen(QPen(theme.lane_color(color), self._pen_w()))
             painter.drawLine(QPointF(lx(b), top), QPointF(lx(b), bot))
 
         font = QFont(option.font)
@@ -246,10 +256,10 @@ class CommitDelegate(QStyledItemDelegate):
         rect = option.rect
         g = row.graph
         for a, b, color in g.top:
-            painter.setPen(QPen(theme.lane_color(color), 2))
+            painter.setPen(QPen(theme.lane_color(color), self._pen_w()))
             painter.drawLine(QPointF(lx(a), top), QPointF(lx(b), mid))
         for a, b, color in g.bottom:
-            painter.setPen(QPen(theme.lane_color(color), 2))
+            painter.setPen(QPen(theme.lane_color(color), self._pen_w()))
             painter.drawLine(QPointF(lx(a), mid), QPointF(lx(b), bot))
 
         cx = lx(g.col)
@@ -258,11 +268,13 @@ class CommitDelegate(QStyledItemDelegate):
         if is_head:        # 当前位置：空心圆
             painter.setPen(QPen(node_color, 2))
             painter.setBrush(QBrush(bg))
-            painter.drawEllipse(QPointF(cx, mid), 5.5, 5.5)
+            r = min(5.5, self._lw / 2.0 + 0.5)
+            painter.drawEllipse(QPointF(cx, mid), r, r)
         else:
             painter.setPen(QPen(bg, 1))
             painter.setBrush(QBrush(node_color))
-            painter.drawEllipse(QPointF(cx, mid), 4.5, 4.5)
+            r = min(4.5, self._lw / 2.0 - 0.5)
+            painter.drawEllipse(QPointF(cx, mid), r, r)
 
         # ---------- 右侧：引用标签 ----------
         pill_font = QFont(option.font)

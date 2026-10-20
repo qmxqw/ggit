@@ -12,15 +12,16 @@ from __future__ import annotations
 import html
 import os
 import time
+from collections import OrderedDict
 
 from PySide6.QtCore import QModelIndex, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFrame, QHBoxLayout,
-                               QHeaderView, QLabel, QListWidget, QListWidgetItem, QMenu,
+                               QHeaderView, QLabel, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QPushButton, QSizePolicy, QSplitter, QStackedWidget,
                                QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from . import fileutil, gitcore
+from . import fileutil, gitcore, theme
 from .graph import GraphLayout
 from .items import FileRow, Row
 from .ui_dialogs import PickerDialog
@@ -31,6 +32,7 @@ from .ui_graph import CommitModel, GraphView
 from .utils import STATUS_COLORS, ago, fmt_time
 
 PAGE = gitcore.LOG_PAGE
+FILES_CACHE_MAX = 300           # 每个项目最多缓存这么多个提交的文件列表
 
 
 # ------------------------------------------------------------------ 小部件工厂
@@ -38,14 +40,13 @@ def _header(text: str):
     """区块标题栏。返回 (框架, 标题标签, 布局)，布局右侧可以再放控件。"""
     frame = QFrame()
     frame.setObjectName("sectionHeader")
-    frame.setStyleSheet("QFrame#sectionHeader{background:#2d2d30;}")
     lay = QHBoxLayout(frame)
     lay.setContentsMargins(8, 4, 6, 4)
     label = QLabel(text)
     f = label.font()
     f.setBold(True)
     label.setFont(f)
-    label.setStyleSheet("color:#bbbbbb;")
+    label.setObjectName("sectionTitle")
     lay.addWidget(label)
     lay.addStretch(1)
     return frame, label, lay
@@ -117,7 +118,8 @@ class ProjectView(QWidget):
         self._last_refresh = 0.0
         self._src = None                # 当前选中的来源：("commit", oid) / ("work", path) / ("hist", oid)
         self._sel_file = None           # 选中的是某个提交下的哪个文件
-        self._files_cache: dict = {}    # 提交 id -> 它修改的文件列表（提交不可变，缓存永远有效）
+        # 提交 id -> 它修改的文件列表（提交不可变，缓存永远有效；只保留最近用过的 FILES_CACHE_MAX 个）
+        self._files_cache: OrderedDict = OrderedDict()
         self._expanded: set = set()     # 展开着的提交
         self._files_loading: set = set()
         self._last_toggle = ("", 0.0)
@@ -149,12 +151,6 @@ class ProjectView(QWidget):
         # 优化：状态栏重构为高质感双行卡片条，主次分明，与右侧水平对齐
         status_bar = QFrame()
         status_bar.setObjectName("projectStatusBar")
-        status_bar.setStyleSheet("""
-            QFrame#projectStatusBar {
-                background: #252528;
-                border-bottom: 1px solid #38383c;
-            }
-        """)
         sv = QVBoxLayout(status_bar)
         sv.setContentsMargins(10, 6, 10, 6)
         sv.setSpacing(3)
@@ -169,23 +165,7 @@ class ProjectView(QWidget):
         self.branch_btn.setText("⎇ … ▾")
         self.branch_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.branch_btn.setToolTip("点击展开分支列表切换查看（本地 / 远端）  (Ctrl+B)")
-        self.branch_btn.setStyleSheet("""
-            QToolButton {
-                background: #36363c;
-                color: #ffffff;
-                font-weight: bold;
-                border-radius: 4px;
-                padding: 3px 8px;
-                border: 1px solid #484850;
-            }
-            QToolButton:hover {
-                background: #44444c;
-                border-color: #0e7ad1;
-            }
-            QToolButton::menu-indicator {
-                image: none;
-            }
-        """)
+        self.branch_btn.setObjectName("branchButton")
         self.branch_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.branch_menu = QMenu(self)
         self.branch_menu.setObjectName("branchMenu")
@@ -200,9 +180,8 @@ class ProjectView(QWidget):
 
         # 第 2 行：上游远端与 fetch 时间（次要元数据，浅灰舒展）
         self.status_meta = QLabel("加载中…")
-        self.status_meta.setStyleSheet("color: #8a8a8e;")
+        self.status_meta.setObjectName("metaText")
         self.status_meta.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.status_label = self.status_meta
         sv.addWidget(self.status_meta)
 
         lv.addWidget(status_bar)
@@ -268,12 +247,6 @@ class ProjectView(QWidget):
 
         info_bar = QFrame()
         info_bar.setObjectName("projectInfoBar")
-        info_bar.setStyleSheet("""
-            QFrame#projectInfoBar {
-                background: #252528;
-                border-bottom: 1px solid #38383c;
-            }
-        """)
         iv = QVBoxLayout(info_bar)
         iv.setContentsMargins(12, 6, 12, 6)
         iv.setSpacing(2)
@@ -356,7 +329,7 @@ class ProjectView(QWidget):
         self.model.head_oid = snap.status.head_oid
         self.graph.viewport().update()
 
-        self._fill_changes(snap.status.changes)
+        self._fill_changes(snap.status.changes, snap.status.total_changes)
         by_path = {c.path: c for c in snap.status.changes}
         for doc in self.docs.docs_of_kind("work"):          # 打开着的“工作区”文档跟着刷新
             ch = by_path.get(doc.data)
@@ -368,6 +341,19 @@ class ProjectView(QWidget):
                 doc.fn = self._work_fn(ch)
                 self.docs.load(doc, quiet=True)
 
+        if self._scope.startswith("ref:") and self._scope[4:] not in snap.refs:
+            # “只看”的那个分支已经被删掉了：回到全部分支，免得提交图一直报错
+            gone = self._scope_ref or ""
+            self._scope_ref = None
+            self.scope_combo.blockSignals(True)
+            self.scope_combo.setCurrentIndex(0)
+            if self.scope_combo.count() > 2:
+                self.scope_combo.removeItem(2)
+            self.scope_combo.blockSignals(False)
+            self._scope = gitcore.SCOPE_ALL
+            self.info.setText(f"<span style='color:{theme.TEXT_DIM}'>分支 {html.escape(gone)} "
+                              "已不存在，已切回“全部分支”。</span>")
+            force = True
         if force or first or snap.fingerprint != self._fp:
             self._fp = snap.fingerprint
             self._reload_graph()
@@ -421,8 +407,8 @@ class ProjectView(QWidget):
         self.status_meta.setToolTip(tip_text)
 
     # ================================================================== 更改列表
-    def _fill_changes(self, changes):
-        """重建“更改”列表，保持原来选中的文件。"""
+    def _fill_changes(self, changes, total: int):
+        """重建“更改”列表，保持原来选中的文件。total：改动文件的真实总数（可能比列出来的多）。"""
         cur_path = self._src[1] if self._src and self._src[0] == "work" else None
         sel = None
         self.changes.blockSignals(True)
@@ -435,7 +421,12 @@ class ProjectView(QWidget):
         if sel is not None:
             self.changes.setCurrentItem(sel)
         self.changes.blockSignals(False)
-        self.changes_title.setText(f"更改  ({len(changes)})" if changes else "更改")
+        if total > len(changes):
+            self.changes_title.setText(f"更改  ({total}，只列出前 {len(changes)} 个)")
+            self.changes_title.setToolTip("改动的文件太多，列表只显示按路径排序后的前一部分。")
+        else:
+            self.changes_title.setText(f"更改  ({len(changes)})" if changes else "更改")
+            self.changes_title.setToolTip("")
 
     def _work_fn(self, ch):
         has_head = bool(self.snap.status.head_oid)
@@ -507,7 +498,7 @@ class ProjectView(QWidget):
         padding_v = max(7, int(round(base_size * 0.7)))
         self.branch_menu.setStyleSheet(f"""
             QMenu#branchMenu {{
-                background-color: #252528;
+                background-color: {theme.PANEL_BG};
                 border: 1px solid #3c3c40;
                 border-radius: 6px;
                 padding: 6px 4px;
@@ -520,7 +511,7 @@ class ProjectView(QWidget):
                 margin: 2px 4px;
             }}
             QMenu#branchMenu::item:selected {{
-                background-color: #0e7ad1;
+                background-color: {theme.ACCENT};
                 color: #ffffff;
             }}
             QMenu#branchMenu::item:disabled {{
@@ -530,7 +521,7 @@ class ProjectView(QWidget):
             }}
             QMenu#branchMenu::separator {{
                 height: 1px;
-                background: #38383c;
+                background: {theme.BORDER};
                 margin: 5px 8px;
             }}
         """)
@@ -645,6 +636,14 @@ class ProjectView(QWidget):
         else:
             self.scope_combo.setCurrentIndex(2)
 
+    def _trim_files_cache(self):
+        """缓存超过上限时丢掉最久没用过的；展开着的提交不能丢（重新加载提交图时要用）。"""
+        extra = len(self._files_cache) - FILES_CACHE_MAX
+        if extra <= 0:
+            return
+        for oid in [o for o in self._files_cache if o not in self._expanded][:extra]:
+            del self._files_cache[oid]
+
     def _expanded_files(self) -> dict:
         return {oid: self._files_cache[oid] for oid in self._expanded if oid in self._files_cache}
 
@@ -714,7 +713,7 @@ class ProjectView(QWidget):
             return
         self._log_loading = False
         self.model.more = False
-        self.status_label.setText(f"<span style='color:#f14c4c'>{html.escape(str(err))}</span>")
+        self.status_meta.setText(f"<span style='color:{theme.ERROR}'>{html.escape(str(err))}</span>")
 
     def _graph_menu(self, pos):
         idx = self.graph.indexAt(pos)
@@ -810,6 +809,7 @@ class ProjectView(QWidget):
         oid = row.commit.oid
         files = self._files_cache.get(oid)
         if files is not None:
+            self._files_cache.move_to_end(oid)
             self._apply_expand(oid, files)
             return
         if oid in self._files_loading:
@@ -826,6 +826,7 @@ class ProjectView(QWidget):
         if not self._alive:
             return
         self._files_cache[oid] = files
+        self._trim_files_cache()
         doc = self.docs.current_doc()                       # 去掉“加载文件列表…”的提示
         self.info.setText(doc.info if doc is not None else "")
         if self._src == ("commit", oid) and doc is None:
@@ -865,11 +866,12 @@ class ProjectView(QWidget):
     def open_file_search(self):
         """Ctrl+F：搜索当前项目里的文件。git 模式：选中后查看它的历史；file 模式：选中后打开预览。"""
         path = self.path
+        on_err = lambda e: QMessageBox.warning(self, "搜索文件", f"读取文件列表失败：\n{e}")    # noqa: E731
         if self._work_mode == "file":
-            self.runner.submit(lambda: fileutil.walk_files(path), self._on_file_list_open, None)
+            # 已跟踪 + 未被忽略的未跟踪文件：node_modules、build 这类被忽略的大目录不会挤满列表
+            self.runner.submit(lambda: gitcore.list_files(path, untracked=True), self._on_file_list_open, on_err)
             return
-        self.runner.submit(lambda: gitcore.list_files(path), self._on_file_list,
-                           lambda e: self.info.setText(f"出错了：{html.escape(str(e))}"))
+        self.runner.submit(lambda: gitcore.list_files(path), self._on_file_list, on_err)
 
     def _on_file_list_open(self, files):
         if not self._alive:
@@ -941,8 +943,7 @@ class ProjectView(QWidget):
         self.hist_list.addItem(f"出错了：{err}")
 
     def _hist_entry_doc(self, e):
-        from .gitcore import CommitFile
-        self._open_commit_file(e.commit, CommitFile(e.status, e.path, e.old_path))
+        self._open_commit_file(e.commit, gitcore.CommitFile(e.status, e.path, e.old_path))
 
     def _on_hist_clicked(self, item):
         if item is None:
@@ -966,6 +967,16 @@ class ProjectView(QWidget):
     # ================================================================== 给主窗口用
     def set_diff_mode(self, mode: str):
         self.docs.set_mode(mode)
+
+    def apply_font_size(self, size: int):
+        """全局字号变了：提交图按新行高重新排版，已打开的文档换代码字号。"""
+        self.model.layoutChanged.emit()
+        self.graph.viewport().update()
+        self.changes.viewport().update()
+        for area in (self.docs, self.file_docs):
+            if area is not None:
+                for doc in area.all_docs():
+                    doc.view.apply_font_size(size)
 
     def reload_docs(self):
         self.docs.reload_all()

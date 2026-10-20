@@ -7,7 +7,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from PySide6.QtWidgets import QApplication
-from ggit.async_runner import AsyncRunner, CancellationToken, GitCancelledError
+from ggit.async_runner import AsyncRunner, CancellationToken
 
 
 class AsyncRunnerTest(unittest.TestCase):

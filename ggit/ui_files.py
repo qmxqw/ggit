@@ -36,14 +36,13 @@ class FileDocument(QWidget):
 
         bar = QFrame()
         bar.setObjectName("fileBar")
-        bar.setStyleSheet("QFrame#fileBar{background:#2d2d30;}")
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(8, 4, 8, 4)
         self.title = QLabel()
         self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.info = QLabel()
-        self.info.setStyleSheet("color:#9a9a9a;")
+        self.info.setObjectName("fileInfo")
         bl.addWidget(self.title, 1)
         bl.addWidget(self.info)
         lay.addWidget(bar)
@@ -52,7 +51,7 @@ class FileDocument(QWidget):
         self.msg_label = QLabel()
         self.msg_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.msg_label.setWordWrap(True)
-        self.msg_label.setStyleSheet("color:#8a8a8a; font-size:13px;")
+        self.msg_label.setObjectName("placeholder")
         self.view = _CodeView(1, False)
         self.stack.addWidget(self.msg_label)    # 0
         self.stack.addWidget(self.view)         # 1
@@ -95,14 +94,7 @@ class FileDocument(QWidget):
         pass
 
     def apply_font_size(self, size: int) -> None:
-        import sys
-        from PySide6.QtGui import QFont, QFontDatabase
-        code_pt = max(8, size + 1)
-        family = "Consolas" if sys.platform == "win32" else QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
-        font = QFont(family, code_pt)
-        self.view.setFont(font)
-        self.view.setTabStopDistance(self.view.fontMetrics().horizontalAdvance(" ") * 4)
-        self.view._update_margin()
+        self.view.apply_ui_size(size)
         if self._fc is not None:
             self._render(True)
 
@@ -158,14 +150,13 @@ class FileTreePanel(QWidget):
 
         hdr = QFrame()
         hdr.setObjectName("fileTreeHeader")
-        hdr.setStyleSheet("QFrame#fileTreeHeader{background:#2d2d30;}")
         hl = QHBoxLayout(hdr)
         hl.setContentsMargins(8, 6, 8, 6)
         title = QLabel(f"文件  ·  {os.path.basename(self.root) or self.root}")
         f = title.font()
         f.setBold(True)
         title.setFont(f)
-        title.setStyleSheet("color:#bbbbbb;")
+        title.setObjectName("sectionTitle")
         title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         title.setToolTip(self.root)
         hl.addWidget(title, 1)

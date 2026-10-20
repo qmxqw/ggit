@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, Q
 
 from . import theme
 from .difftools import build_split, change_groups, trim_context
+from .options import FONT_DEFAULT
 
 MAX_ROWS = 30000            # 超过就截断，避免一次塞太多行卡住界面
 MODE_UNIFIED = "unified"
@@ -36,6 +37,16 @@ QScrollBar::handle:vertical:hover { background: rgba(210,210,210,110); }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; border: none; background: none; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
 """
+
+
+def code_font(ui_pt: int) -> QFont:
+    """代码视图用的等宽字体：比界面字体大 1 号，最小 8 pt。"""
+    pt = max(8, ui_pt + 1)
+    if sys.platform == "win32":
+        return QFont("Consolas", pt)
+    font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    font.setPointSize(pt)
+    return font
 
 
 def _n(x) -> str:
@@ -160,34 +171,18 @@ class _CodeView(QPlainTextEdit):
         self.setReadOnly(True)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.setFrameShape(QFrame.Shape.NoFrame)
-        app = QApplication.instance()
-        base_pt = app.font().pointSize() if app and app.font().pointSize() > 0 else 9
-        code_pt = max(8, base_pt + 1)
-        if sys.platform == "win32":
-            font = QFont("Consolas", code_pt)
-        else:
-            font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-            font.setPointSize(code_pt)
-        self.setFont(font)
-        self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
         self._gutter = _Gutter(self)
         self.blockCountChanged.connect(self._update_margin)
         self.updateRequest.connect(self._on_update_request)
-        self._update_margin()
+        app = QApplication.instance()
+        ui_pt = app.font().pointSize() if app and app.font().pointSize() > 0 else FONT_DEFAULT
+        self.apply_ui_size(ui_pt)
 
-    def changeEvent(self, event):
-        super().changeEvent(event)
-        from PySide6.QtCore import QEvent
-        if event.type() == QEvent.Type.FontChange:
-            app = QApplication.instance()
-            base_pt = app.font().pointSize() if app and app.font().pointSize() > 0 else 9
-            target_pt = max(8, base_pt + 1)
-            f = self.font()
-            if f.pointSize() != target_pt:
-                f.setPointSize(target_pt)
-                self.setFont(f)
-                self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
-                self._update_margin()
+    def apply_ui_size(self, ui_pt: int) -> None:
+        """界面字号变了：代码字体（等宽，比界面字体大 1 号）跟着变。"""
+        self.setFont(code_font(ui_pt))
+        self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
+        self._update_margin()
 
     def set_blocks(self, blocks: list) -> None:
         self._nums = [b.nums for b in blocks]
@@ -316,13 +311,13 @@ class SplitView(QWidget):
         self.right = _CodeView(1, False)
         for v in (self.left, self.right):
             v.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.left.setStyleSheet("QPlainTextEdit{border:none; border-right:1px solid #3c3c3c;}")
+        self.left.setObjectName("splitLeft")
         self.bar = MarkerScrollBar()
         self.nav = ChangeNavigator(self.bar)
         for text, col in (("修改前", 0), ("修改后", 1)):
             lab = QLabel(text)
             lab.setContentsMargins(10, 2, 0, 2)
-            lab.setStyleSheet("color:#8a8a8a; background:#252526;")
+            lab.setObjectName("splitCaption")
             grid.addWidget(lab, 0, col)
         grid.addWidget(self.left, 1, 0)
         grid.addWidget(self.right, 1, 1)
@@ -412,7 +407,6 @@ class DiffDocument(QWidget):
 
         bar = QFrame()
         bar.setObjectName("diffBar")
-        bar.setStyleSheet("QFrame#diffBar{background:#2d2d30;}")
         bl = QHBoxLayout(bar)
         bl.setContentsMargins(8, 4, 6, 4)
         self.title = QLabel()
@@ -437,7 +431,7 @@ class DiffDocument(QWidget):
         self.msg_label = QLabel()
         self.msg_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.msg_label.setWordWrap(True)
-        self.msg_label.setStyleSheet("color:#8a8a8a; font-size:13px;")
+        self.msg_label.setObjectName("placeholder")
         self.unified = UnifiedView()
         self.split = SplitView()
         self.stack.addWidget(self.msg_label)    # 0
@@ -479,13 +473,8 @@ class DiffDocument(QWidget):
         self.set_diff(fd, keep_scroll)
 
     def apply_font_size(self, size: int) -> None:
-        code_pt = max(8, size + 1)
-        family = "Consolas" if sys.platform == "win32" else QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
-        font = QFont(family, code_pt)
         for v in (self.unified, self.split.left, self.split.right):
-            v.setFont(font)
-            v.setTabStopDistance(v.fontMetrics().horizontalAdvance(" ") * 4)
-            v._update_margin()
+            v.apply_ui_size(size)
         if self.fd is not None:
             self._render(True)
 

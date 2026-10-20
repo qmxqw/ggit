@@ -76,6 +76,8 @@ class MainWindow(QMainWindow):
         self.current = -1
         self._last_badge_refresh = 0.0
         self._quitting = False
+        self._nav_stale = False        # 拖动顶部标签期间有被推迟的标签更新
+        self._save_error = ""          # 上一次保存配置失败的原因（同一个错误只提示一次）
         self._tip_shown = False
 
         cfg = config.load()
@@ -130,20 +132,19 @@ class MainWindow(QMainWindow):
 
         bar = QFrame()
         bar.setObjectName("topBar")
-        bar.setStyleSheet("QFrame#topBar{background:#2d2d30;} QFrame#topBar QToolButton::menu-indicator{image:none;width:0px;}")
         h = QHBoxLayout(bar)
         h.setContentsMargins(0, 0, 8, 0)
         h.setSpacing(6)
         self.nav = ProjectNav()
         self.nav.selected.connect(self.switch_to)
         self.nav.reordered.connect(self.move_project)
+        self.nav.dragFinished.connect(self._on_nav_drag_finished)
         h.addWidget(self.nav, 1)
 
         self.more_menu = QMenu(self)
         self.more_btn = QToolButton()
         self.more_btn.setText("全部项目 ▾")
         self.more_btn.setToolTip("所有项目（也可以按 Ctrl+P 搜索切换）")
-        self.more_btn.setStyleSheet("QToolButton::menu-indicator { image: none; width: 0px; }")
         self.more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.more_btn.setMenu(self.more_menu)
         h.addWidget(self.more_btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -158,7 +159,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.empty_page = QLabel("还没有项目。\n\n点击右上角“＋ 添加项目”，或按 Ctrl+O，选择一个 Git 项目目录。")
         self.empty_page.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_page.setStyleSheet("color:#8a8a8a; font-size:14px;")
+        self.empty_page.setObjectName("emptyPage")
         self.stack.addWidget(self.empty_page)
         v.addWidget(self.stack, 1)
         self.setCentralWidget(central)
@@ -303,7 +304,15 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     # ================================================================== 顶部导航
+    def _on_nav_drag_finished(self):
+        if self._nav_stale:             # 拖动期间有状态更新被推迟了：现在补上
+            self._nav_stale = False
+            self.rebuild_nav()
+
     def _update_button(self, i: int):
+        if self.nav.dragging:           # 拖动中按钮顺序和项目列表对不上：等拖完再更新
+            self._nav_stale = True
+            return
         b = self.nav.button(i)
         if b is None or i >= len(self.projects):
             return
@@ -417,11 +426,18 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "选择 Git 项目目录", start)
         if not d:
             return
-        try:
-            top = gitcore.toplevel(d)
-        except gitcore.GitError as e:
-            QMessageBox.warning(self, "不是 Git 仓库", f"{d}\n\n{e}")
-            return
+        # 放到后台：目录在慢速网络盘上时，git 可能要好几秒才返回，不能卡住界面
+        self.statusBar().showMessage(f"正在检查：{d} …")
+        self.runner.submit(lambda: gitcore.toplevel(d),
+                           self._add_project_path,
+                           lambda e: self._add_project_failed(d, e))
+
+    def _add_project_failed(self, d: str, err) -> None:
+        self.statusBar().clearMessage()
+        QMessageBox.warning(self, "不是 Git 仓库", f"{d}\n\n{err}")
+
+    def _add_project_path(self, top: str) -> None:
+        self.statusBar().clearMessage()
         for i, p in enumerate(self.projects):
             if os.path.normcase(p.path) == os.path.normcase(top):
                 self.switch_to(i)
@@ -619,26 +635,14 @@ class MainWindow(QMainWindow):
             wf.setPointSize(size)
             w.setFont(wf)
 
-        # 3. 项目视图与提交树、更改列表
+        # 3. 各项目页面：提交图重新排版，已打开的文档换代码字号
         for view in self.views.values():
-            if hasattr(view, "model"):
-                view.model.layoutChanged.emit()
-            if hasattr(view, "graph"):
-                view.graph.viewport().update()
-            if hasattr(view, "changes"):
-                view.changes.viewport().update()
-
-            # 4. 当前已打开的文档实时重新排版正文与行号
-            for doc_area in (getattr(view, "docs", None), getattr(view, "file_docs", None)):
-                if doc_area is not None:
-                    for doc in list(doc_area._docs.values()):
-                        if hasattr(doc.view, "apply_font_size"):
-                            doc.view.apply_font_size(size)
+            view.apply_font_size(size)
 
     # ================================================================== 保存
     def _save_config(self):
         cur = self.projects[self.current].path if 0 <= self.current < len(self.projects) else None
-        config.save({
+        err = config.save({
             "projects": [{"path": p.path, "name": p.name} for p in self.projects],
             "current": cur,
             "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
@@ -649,3 +653,8 @@ class MainWindow(QMainWindow):
                         "work_mode": self.options.work_mode,
                         "font_size": self.options.font_size},
         })
+        if err and err != self._save_error:      # 同一个错误只提示一次，免得每次切换项目都弹
+            self.statusBar().showMessage(f"配置保存失败（{config.config_path()}）：{err}", 10000)
+            if self.tray is not None and not self.isVisible():
+                self.tray.showMessage("ggit 配置保存失败", err, QSystemTrayIcon.MessageIcon.Warning, 6000)
+        self._save_error = err
