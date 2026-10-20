@@ -20,6 +20,7 @@ LANE_W = 14
 PAD = 8
 GRAPH_MAX_W = 10 * LANE_W   # 分支线区域最宽这么多；线多时压窄列宽
 MIN_LANE_W = 5              # 列宽最窄压到这么多，再多的线才挤在最后一列
+TOOLTIP_BODY_LINES = 30     # 悬停提示里最多显示多少行提交正文
 FILE_INDENT = 22    # 文件行相对提交说明再缩进多少
 
 
@@ -29,12 +30,18 @@ def _tooltip(item) -> str:
         return f"<p style='white-space:pre'>{html.escape(f.path)}" + \
                (f"<br>（重命名自 {html.escape(f.old_path)}）" if f.old_path else "") + "</p>"
     c: Commit = item.commit
+    s = f"<p style='white-space:pre'><b>{html.escape(c.subject)}</b></p>"
+    if c.body:                  # 多行的提交说明：标题下面接着显示正文，最多 TOOLTIP_BODY_LINES 行
+        lines = c.body.split("\n")
+        shown = "\n".join(lines[:TOOLTIP_BODY_LINES])
+        if len(lines) > TOOLTIP_BODY_LINES:
+            shown += f"\n…（还有 {len(lines) - TOOLTIP_BODY_LINES} 行）"
+        s += f"<p style='white-space:pre-wrap'>{html.escape(shown)}</p>"
+    meta = f"{c.short} · {html.escape(c.author)} · {fmt_time(c.time)}"
     refs = ", ".join(r.name for r in c.refs)
-    s = (f"<p style='white-space:pre'><b>{html.escape(c.subject)}</b><br>"
-         f"{c.short} · {html.escape(c.author)} · {fmt_time(c.time)}")
     if refs:
-        s += f"<br>{html.escape(refs)}"
-    return s + "</p>"
+        meta += f"<br>{html.escape(refs)}"
+    return s + f"<p style='white-space:pre; color:{theme.TEXT_DIM}'>{meta}</p>"
 
 
 class CommitModel(QAbstractListModel):

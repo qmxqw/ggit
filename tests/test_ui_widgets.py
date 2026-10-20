@@ -139,6 +139,27 @@ class StatusBarTest(support.QtTestCase):
         self.assertIn("boom &lt;b&gt;", bar.meta.text())
 
 
+class CommitTooltipTest(support.QtTestCase):
+    def tooltip(self, commit):
+        model = CommitModel()
+        self.addCleanup(model.deleteLater)
+        model.reset([Row(commit, GraphRow(col=0, color=0))], head_oid="", more=False)
+        return model.data(model.index(0, 0), Qt.ItemDataRole.ToolTipRole)
+
+    def test_single_line_message(self):
+        tip = self.tooltip(Commit("1" * 40, [], "alice", 1000, [], "只有标题"))
+        self.assertIn("只有标题", tip)
+        self.assertIn("alice", tip)
+
+    def test_body_shows_first_30_lines(self):
+        body = "\n".join(f"line{i} <x>" for i in range(1, 41))
+        tip = self.tooltip(Commit("1" * 40, [], "alice", 1000, [], "标题", body))
+        self.assertIn("line30 &lt;x&gt;", tip)                    # 正文按原样显示（转义过）
+        self.assertNotIn("line31", tip)
+        self.assertIn("还有 10 行", tip)
+        self.assertLess(tip.index("标题"), tip.index("line1 "))    # 标题在正文前面
+
+
 class GraphTooltipTest(support.QtTestCase):
     def test_tooltip_follows_rows(self):
         view = GraphView()

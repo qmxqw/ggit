@@ -216,6 +216,7 @@ class Commit:
     time: int
     refs: list
     subject: str
+    body: str = ""       # 提交说明里标题以外的部分（只有提交图读的提交才有）
 
     @property
     def short(self) -> str:
@@ -410,6 +411,7 @@ def get_branches(repo: str) -> list:
 # 提交日志（提交图的数据来源）
 # --------------------------------------------------------------------------
 _FIELDS = "%H%x1f%P%x1f%an%x1f%at%x1f%D%x1f%s"
+_LOG_FIELDS = _FIELDS + "%x1f%b"     # 提交图还要正文（文件历史按行解析，不能带多行的正文）
 
 
 def _strip_prefix(s: str, prefix: str) -> str:
@@ -441,7 +443,12 @@ def parse_decorations(s: str) -> list:
     return refs
 
 
-def _commit_from_fields(f: list) -> Commit | None:
+def _decode_body(raw: bytes) -> str:
+    """解码多行的提交正文：逐行解码，去掉行尾空白和首尾的空行。"""
+    return "\n".join(decode_line(ln).rstrip() for ln in raw.split(b"\n")).strip("\n")
+
+
+def _commit_from_fields(f: list, with_body: bool = False) -> Commit | None:
     if len(f) < 6:
         return None
     oid = decode_line(f[0]).strip()
@@ -450,9 +457,12 @@ def _commit_from_fields(f: list) -> Commit | None:
         ts = int(decode_line(f[3]).strip())
     except ValueError:
         ts = 0
-    subject = decode_line(b"\x1f".join(f[5:])).strip()
+    if with_body and len(f) >= 7:
+        subject, body = decode_line(f[5]).strip(), _decode_body(b"\x1f".join(f[6:]))
+    else:
+        subject, body = decode_line(b"\x1f".join(f[5:])).strip(), ""
     return Commit(oid, parents, decode_line(f[2]), ts,
-                  parse_decorations(decode_line(f[4])), subject)
+                  parse_decorations(decode_line(f[4])), subject, body)
 
 
 def parse_log(data: bytes) -> list:
@@ -460,7 +470,7 @@ def parse_log(data: bytes) -> list:
     for rec in data.split(b"\0"):
         if not rec.strip():
             continue
-        c = _commit_from_fields(rec.lstrip(b"\n").split(b"\x1f"))
+        c = _commit_from_fields(rec.lstrip(b"\n").split(b"\x1f"), with_body=True)
         if c:
             commits.append(c)
     return commits
@@ -483,7 +493,7 @@ def get_log(repo: str, snap: Snapshot, scope: str = SCOPE_AUTO,
     if not snap.status.head_oid:
         return []
     args = ["log", "--date-order", "--decorate=full", "--no-color", "-z",
-            f"--format={_FIELDS}", f"--max-count={limit}"]
+            f"--format={_LOG_FIELDS}", f"--max-count={limit}"]
     if skip:
         args.append(f"--skip={skip}")
     args += _log_revs(snap, scope)

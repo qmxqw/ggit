@@ -279,6 +279,17 @@ class SmallRepoTest(unittest.TestCase):
         self.assertEqual(len(gitcore.get_status(self.repo).changes), 2)
         self.assertEqual([c.path for c in gitcore.get_status(self.repo, untracked="normal").changes], ["sub/"])
 
+    def test_multiline_message(self):
+        write(self.repo, "a.txt", "1\n")
+        commit(self.repo, "标题\n\n第一行正文\n第二行正文\n")
+        write(self.repo, "a.txt", "2\n")
+        commit(self.repo, "单行")
+        snap = gitcore.get_snapshot(self.repo)
+        log = gitcore.get_log(self.repo, snap)
+        self.assertEqual([(c.subject, c.body) for c in log], [("单行", ""), ("标题", "第一行正文\n第二行正文")])
+        hist = gitcore.get_file_history(self.repo, "a.txt")            # 文件历史按行解析，不受多行正文影响
+        self.assertEqual([h.commit.subject for h in hist], ["单行", "标题"])
+
     def test_list_files_with_untracked(self):
         write(self.repo, ".gitignore", "build/\n")
         write(self.repo, "a.txt", "1\n")
