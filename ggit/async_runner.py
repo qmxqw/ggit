@@ -1,4 +1,8 @@
-"""把耗时的 git 调用放到后台线程，结果回到界面线程的回调里。支持主动取消任务并终止子进程。"""
+"""把耗时的 git 调用放到后台线程，结果回到界面线程的回调里。支持主动取消任务并终止子进程。
+
+submit：读取类任务。submit_stream：写操作（push / pull / 命令面板），边执行边把输出送回界面线程；
+写操作用单独的线程池，几个很慢的 push 不会让刷新、diff 排队等着。
+"""
 from __future__ import annotations
 
 import contextlib
@@ -13,10 +17,12 @@ __all__ = ["AsyncRunner", "CancellationToken", "GitCancelledError"]
 
 OnOk = Callable[[Any], None]
 OnErr = Callable[[BaseException], None]
+OnOutput = Callable[[str], None]
 
 
 class _Signals(QObject):
     finished = Signal(int, object, object)     # 编号, 结果, 异常
+    output = Signal(int, str)                  # 编号, 一段输出（submit_stream）
 
 
 class _Job(QRunnable):
@@ -27,6 +33,11 @@ class _Job(QRunnable):
         self.cancel_token = cancel_token
         self.fn = fn
         self.signals = signals
+
+    def emit_output(self, text: str) -> None:
+        if not self.cancel_token.cancelled:
+            with contextlib.suppress(RuntimeError):
+                self.signals.output.emit(self.token_id, text)
 
     def run(self) -> None:
         if self.cancel_token.cancelled:
@@ -53,10 +64,14 @@ class AsyncRunner(QObject):
         super().__init__(parent)
         self._signals = _Signals()
         self._signals.finished.connect(self._on_finished)
+        self._signals.output.connect(self._on_output)
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(6)
+        self._op_pool = QThreadPool()           # 写操作
+        self._op_pool.setMaxThreadCount(4)
         self._next = 0
         self._callbacks: dict[int, tuple[OnOk | None, OnErr | None]] = {}
+        self._outputs: dict[int, OnOutput] = {}
         self._tokens: dict[int, CancellationToken] = {}
 
     def submit(self, fn: Callable[[], Any], on_ok: OnOk | None = None, on_err: OnErr | None = None) -> int:
@@ -69,18 +84,46 @@ class AsyncRunner(QObject):
         self._pool.start(_Job(token_id, cancel_token, fn, self._signals))
         return token_id
 
+    def submit_stream(self, fn: Callable[[OnOutput], Any], on_output: OnOutput | None = None,
+                      on_ok: OnOk | None = None, on_err: OnErr | None = None) -> int:
+        """在写操作线程池里执行 fn(emit)；fn 调用 emit(文字) 时，on_output 在界面线程收到这段文字。"""
+        self._next += 1
+        token_id = self._next
+        cancel_token = CancellationToken()
+        self._callbacks[token_id] = (on_ok, on_err)
+        if on_output:
+            self._outputs[token_id] = on_output
+        self._tokens[token_id] = cancel_token
+        job = _Job(token_id, cancel_token, lambda: None, self._signals)
+        job.fn = lambda: fn(job.emit_output)
+        self._op_pool.start(job)
+        return token_id
+
     def cancel(self, token_id: int | None) -> None:
         """取消任务：还没开始的不再执行，正在跑的 git 子进程被结束；回调都不会再被调用。"""
         if token_id is None:
             return
         self._callbacks.pop(token_id, None)
+        self._outputs.pop(token_id, None)
         token = self._tokens.pop(token_id, None)
         if token:
             token.cancel()
 
+    @Slot(int, str)
+    def _on_output(self, token_id: int, text: str) -> None:
+        on_output = self._outputs.get(token_id)
+        if on_output is None:
+            return
+        try:
+            on_output(text)
+        except RuntimeError as e:
+            if "already deleted" not in str(e):
+                raise
+
     @Slot(int, object, object)
     def _on_finished(self, token_id: int, res: Any, err: BaseException | None) -> None:
         self._tokens.pop(token_id, None)
+        self._outputs.pop(token_id, None)
         on_ok, on_err = self._callbacks.pop(token_id, (None, None))
         if isinstance(err, GitCancelledError):
             return
@@ -100,4 +143,6 @@ class AsyncRunner(QObject):
             token.cancel()
         self._tokens.clear()
         self._callbacks.clear()
+        self._outputs.clear()
         self._pool.waitForDone(1000)
+        self._op_pool.waitForDone(1000)

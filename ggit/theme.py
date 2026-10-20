@@ -140,6 +140,28 @@ QToolButton#branchButton {
 QToolButton#branchButton:hover { background: #44444c; border-color: $ACCENT; }
 QToolButton#branchButton::menu-indicator { image: none; }
 
+/* 状态行的 Fetch / Pull / Push、继续 / 中止 */
+QToolButton#syncButton {
+    background: #333338; color: $TEXT; border: 1px solid #45454c; border-radius: 4px; padding: 2px 8px;
+}
+QToolButton#syncButton:hover { border-color: $ACCENT; background: #3c3c44; }
+QToolButton#syncButton:disabled { color: #6e6e6e; border-color: #3a3a3f; }
+
+/* “更改”下面的提交框 */
+QFrame#commitBox { background: $PANEL_BG; border-top: 1px solid $BORDER; }
+QPushButton#commitButton {
+    background: $ACCENT; color: $TEXT_BRIGHT; border: none; border-radius: 4px; padding: 4px 18px;
+}
+QPushButton#commitButton:hover { background: #1c8ae0; }
+QPushButton#commitButton:disabled { background: #3a3a3f; color: #6e6e6e; }
+
+/* 命令面板 */
+QPlainTextEdit#consoleOutput { border: none; border-top: 1px solid $BORDER; }
+QWidget#consoleInputRow { background: $BAR_BG; }
+QLabel#consolePrompt { color: $REF_TEXT; font-weight: bold; }
+QLineEdit#consoleInput { border: 1px solid $EDITOR_BORDER; background: $EDITOR_BG; padding: 2px 4px; }
+QLineEdit#consoleInput:focus { border-color: $ACCENT; }
+
 /* 拖动项目标签时的占位槽 */
 QWidget#dragPlaceholder {
     background: rgba(255, 255, 255, 0.05); border: 1px dashed $ACCENT; border-radius: 2px;
@@ -152,7 +174,7 @@ def stylesheet(font_pt: int = FONT_DEFAULT) -> str:
     return _STYLE.substitute(
         TEXT=TEXT, TEXT_BRIGHT=TEXT_BRIGHT, TEXT_HEADER=TEXT_HEADER, TEXT_MUTED=TEXT_MUTED,
         TEXT_DIM=TEXT_DIM, BAR_BG=BAR_BG, PANEL_BG=PANEL_BG, WINDOW_BG=WINDOW_BG, EDITOR_BG=EDITOR_BG,
-        BORDER=BORDER, EDITOR_BORDER=EDITOR_BORDER, ACCENT=ACCENT,
+        BORDER=BORDER, EDITOR_BORDER=EDITOR_BORDER, ACCENT=ACCENT, REF_TEXT=REF_TEXT,
         PLACEHOLDER_PT=font_pt + 1, EMPTY_PAGE_PT=font_pt + 2)
 
 

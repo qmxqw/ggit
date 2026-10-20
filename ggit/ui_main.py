@@ -3,6 +3,7 @@
 切换项目：鼠标点击顶部大标签；Ctrl+1 … Ctrl+9、Ctrl+0 对应前 10 个；
 Ctrl+Tab / Ctrl+Shift+Tab 循环切换；Ctrl+P 搜索切换（含第 10 个之后的项目）。
 窗口的 × 只是隐藏到后台；Alt+G（全局）显示到最前面 / 隐藏；托盘菜单或 Ctrl+Q 才是真正退出。
+“Git”菜单：Fetch / Pull / Push、分支、提交、储藏、命令面板（Ctrl+`）；窗口隐藏时写操作的结果用托盘通知。
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, config, gitcore, theme, winhotkey
+from . import __version__, config, gitcore, gitops, theme, winhotkey
 from .async_runner import AsyncRunner
 from .icon import app_icon
 from .options import FONT_DEFAULT, FONT_MAX, FONT_MIN, ViewOptions
@@ -93,6 +94,8 @@ class MainWindow(QMainWindow):
         self._nav_stale = False        # 拖动顶部标签期间有被推迟的标签更新
         self._save_error = ""          # 上一次保存配置失败的原因（同一个错误只提示一次）
         self._tip_shown = False
+        self._cmd_history: dict = {}   # 路径 -> 命令面板的历史命令（还没打开过的项目也要原样保存）
+        self._fetch_all: dict | None = None    # “Fetch 全部项目”进行中：{"left": 剩几个, "failed": [项目名]}
 
         cfg = config.load()
         for p in cfg.get("projects", []):
@@ -110,6 +113,11 @@ class MainWindow(QMainWindow):
                 self.options.work_mode = opts["work_mode"]
             if isinstance(opts.get("font_size"), int):
                 self.options.font_size = max(FONT_MIN, min(FONT_MAX, opts["font_size"]))
+            if opts.get("pull_mode") in gitops.PULL_MODES:
+                self.options.pull_mode = opts["pull_mode"]
+        hist = cfg.get("cmd_history")
+        if isinstance(hist, dict):
+            self._cmd_history = {k: v for k, v in hist.items() if isinstance(k, str) and isinstance(v, list)}
 
         if self.options.font_size != FONT_DEFAULT:
             self._apply_font_size(self.options.font_size)
@@ -246,6 +254,47 @@ class MainWindow(QMainWindow):
         self._act(v, "缩小字体", "Ctrl+-", lambda: self.change_font_size(-1))
         self._act(v, "重置字体大小", "Ctrl+Shift+0", self.reset_font_size)
 
+        g = mb.addMenu("Git(&G)")
+        self._act(g, "Fetch（获取所有远端）", "Ctrl+Shift+F", lambda: self._ops(lambda o: o.fetch()))
+        self._act(g, "Pull（拉取）", "Ctrl+Shift+L", lambda: self._ops(lambda o: o.pull()))
+        self._act(g, "Pull（rebase 方式）", None, lambda: self._ops(lambda o: o.pull(gitops.PULL_REBASE)))
+        self._act(g, "Pull（merge 方式）", None, lambda: self._ops(lambda o: o.pull(gitops.PULL_MERGE)))
+        self._act(g, "Push（推送）", "Ctrl+Shift+K", lambda: self._ops(lambda o: o.push()))
+        self._act(g, "强制推送（--force-with-lease）…", None, lambda: self._ops(lambda o: o.push(force=True)))
+        self._act(g, "Fetch 全部项目", None, self.fetch_all)
+        g.addSeparator()
+        self._act(g, "切换分支…", None, lambda: self._ops(
+            lambda o: o.pick_branch("切换分支", o.switch_branch)))
+        self._act(g, "新建分支…", None, lambda: self._ops(lambda o: o.create_branch("HEAD", "当前提交")))
+        self._act(g, "合并分支到当前分支…", None, lambda: self._ops(
+            lambda o: o.pick_branch("合并分支到当前分支", o.merge_branch)))
+        self._act(g, "删除分支…", None, lambda: self._ops(
+            lambda o: o.pick_branch("删除分支", o.delete_branch)))
+        g.addSeparator()
+        self._act(g, "提交…（填写提交说明）", "Ctrl+K", self.focus_commit)
+        self._act(g, "暂存全部改动", None, lambda: self._ops(lambda o: o.run(["add", "-A"], "暂存全部")))
+        g.addSeparator()
+        self._act(g, "储藏改动（stash）…", None, lambda: self._ops(lambda o: o.stash_push()))
+        self._act(g, "恢复最近的储藏（stash pop）", None, lambda: self._ops(lambda o: o.stash_pop()))
+        self._act(g, "储藏列表…", None, lambda: self._ops(lambda o: o.stash_browse()))
+        g.addSeparator()
+        self._act(g, "继续合并 / 变基", None, lambda: self._ops(lambda o: o.continue_operation()))
+        self._act(g, "中止合并 / 变基…", None, lambda: self._ops(lambda o: o.abort_operation()))
+        g.addSeparator()
+        pm = g.addMenu("Pull 的默认方式")
+        pgrp = QActionGroup(self)
+        pgrp.setExclusive(True)
+        for label, val in (("只快进（--ff-only，有分叉时报错，推荐）", gitops.PULL_FF_ONLY),
+                           ("变基（--rebase）", gitops.PULL_REBASE), ("合并（--no-rebase）", gitops.PULL_MERGE)):
+            a = QAction(label, self)
+            a.setCheckable(True)
+            a.setChecked(self.options.pull_mode == val)
+            a.triggered.connect(lambda _=False, x=val: self._set_pull_mode(x))
+            pgrp.addAction(a)
+            pm.addAction(a)
+        g.addSeparator()
+        self._act(g, "命令面板（输入 git 命令）", "Ctrl+`", self.toggle_console)
+
         hm = mb.addMenu("帮助(&H)")
         self._act(hm, "关于 ggit", None, self._about)
 
@@ -270,6 +319,7 @@ class MainWindow(QMainWindow):
         self._tray_menu = menu
         menu.addAction("显示 / 隐藏   (Alt+G)").triggered.connect(lambda _=False: self.toggle_visibility())
         menu.addAction("刷新当前项目").triggered.connect(lambda _=False: self.refresh_current())
+        menu.addAction("Fetch 全部项目").triggered.connect(lambda _=False: self.fetch_all())
         menu.addSeparator()
         menu.addAction("退出 ggit").triggered.connect(lambda _=False: self.quit_app())
         self.tray.setContextMenu(menu)
@@ -407,8 +457,10 @@ class MainWindow(QMainWindow):
         entry = self.projects[index]
         view = self.views.get(entry.path)
         if view is None:
-            view = ProjectView(entry.path, entry.name, self.runner, self.options)
+            view = ProjectView(entry.path, entry.name, self.runner, self.options,
+                               history=self._cmd_history.get(entry.path))
             view.statusChanged.connect(self._on_view_status)
+            view.opFinished.connect(self._on_op_finished)
             view.modeToggleRequested.connect(self.toggle_diff_mode)
             view.set_work_mode(self.options.work_mode)
             self.stack.addWidget(view)
@@ -476,6 +528,8 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if ok != QMessageBox.StandardButton.Yes:
             return
+        self._fetch_all_one(e.path, e.name, False)     # 正在“Fetch 全部项目”：不再等这个项目
+        self._cmd_history.pop(e.path, None)
         view = self.views.pop(e.path, None)
         if view is not None:
             view.dispose()
@@ -564,6 +618,93 @@ class MainWindow(QMainWindow):
                 v.refresh()
             self._refresh_badges()
 
+    # ================================================================== Git 写操作
+    def _ops(self, fn):
+        v = self.current_view()
+        if v is not None:
+            fn(v.ops)
+
+    def toggle_console(self):
+        v = self.current_view()
+        if v is not None:
+            v.toggle_console()
+
+    def focus_commit(self):
+        v = self.current_view()
+        if v is None:
+            return
+        if self.options.work_mode != "git":
+            self.toggle_work_mode()
+        v.focus_commit()
+
+    def _set_pull_mode(self, mode: str):
+        self.options.pull_mode = mode
+        self._save_config()
+
+    def _on_op_finished(self, view, label: str, ok: bool, detail: str):
+        if self._fetch_all is not None and label == "Fetch" and view.path in self._fetch_all["pending"]:
+            self._fetch_all_one(view.path, view.name, ok)
+            return
+        text = f"{view.name}：{label} {'完成' if ok else '失败'}" + ("" if ok else f" — {detail}")
+        self.statusBar().showMessage(text, 8000)
+        if self.tray is not None and not self.isVisible():     # 窗口在后台：用托盘通知结果
+            icon = QSystemTrayIcon.MessageIcon.Information if ok else QSystemTrayIcon.MessageIcon.Warning
+            self.tray.showMessage(f"ggit · {view.name}", f"{label} {'完成' if ok else '失败'}\n{detail}", icon, 5000)
+
+    def fetch_all(self):
+        """对所有项目执行 fetch（同时最多 4 个）；打开过的项目输出写到各自的命令面板。"""
+        if self._fetch_all is not None:
+            self.statusBar().showMessage("“Fetch 全部项目”还在进行中…", 4000)
+            return
+        if not self.projects:
+            return
+        self._fetch_all = {"pending": set(), "failed": [], "total": len(self.projects)}
+        for e in self.projects:
+            self._fetch_all["pending"].add(e.path)
+        for e in list(self.projects):
+            view = self.views.get(e.path)
+            if view is not None:
+                if not view.ops.fetch():                    # 这个项目正在执行别的操作
+                    self._fetch_all_one(e.path, e.name, False)
+                continue
+            self._fetch_in_background(e.path, e.name)
+        if self._fetch_all is not None:
+            self.statusBar().showMessage(f"正在 fetch 全部 {len(self.projects)} 个项目…")
+
+    def _fetch_in_background(self, path: str, name: str) -> None:
+        """还没打开过的项目：不经过命令面板，直接在后台 fetch。"""
+        def work(_emit) -> gitops.OpResult:
+            return gitops.run_git_stream(path, gitops.fetch_args())
+
+        def done(res: gitops.OpResult) -> None:
+            self._fetch_all_one(path, name, res.ok)
+
+        def failed(_err: BaseException) -> None:
+            self._fetch_all_one(path, name, False)
+
+        self.runner.submit_stream(work, None, done, failed)
+
+    def _fetch_all_one(self, path: str, name: str, ok: bool):
+        st = self._fetch_all
+        if st is None or path not in st["pending"]:
+            return
+        st["pending"].discard(path)
+        if not ok:
+            st["failed"].append(name)
+        if path not in self.views:
+            self._read_badge(path)
+        if st["pending"]:
+            return
+        self._fetch_all = None
+        failed = st["failed"]
+        if failed:
+            msg = f"Fetch 全部项目：{st['total'] - len(failed)} 个成功，{len(failed)} 个失败（{'、'.join(failed)}）"
+        else:
+            msg = f"Fetch 全部项目：{st['total']} 个项目都已完成"
+        self.statusBar().showMessage(msg, 10000)
+        if self.tray is not None and not self.isVisible():
+            self.tray.showMessage("ggit", msg, QSystemTrayIcon.MessageIcon.Information, 5000)
+
     # ================================================================== 菜单动作
     def branch_picker(self):
         v = self.current_view()
@@ -615,12 +756,13 @@ class MainWindow(QMainWindow):
     def _about(self):
         QMessageBox.about(
             self, "关于 ggit",
-            f"<b>ggit {__version__}</b><br>多项目 Git 只读查看工具。<br><br>"
+            f"<b>ggit {__version__}</b><br>多项目 Git 查看与操作工具。<br><br>"
             "显示 / 隐藏（全局）：Alt+G<br>切换 git / 文件工作模式：Alt+F<br>"
             "切换项目：Ctrl+1…0 / Ctrl+Tab / Ctrl+P<br>刷新：F5<br>"
             "分支列表：Ctrl+B（或点左上角的分支名）<br>文件历史：Ctrl+F<br>"
             "切换 diff 模式：Alt+D<br>上一处 / 下一处改动：F3 / F4<br>"
-            "关闭文档：Ctrl+W")
+            "关闭文档：Ctrl+W<br><br>Fetch / Pull / Push：Ctrl+Shift+F / L / K<br>"
+            "提交：Ctrl+K（说明框里 Ctrl+Enter 提交）<br>命令面板：Ctrl+`")
 
     # ================================================================== 字体缩放
     def change_font_size(self, delta: int) -> None:
@@ -662,6 +804,10 @@ class MainWindow(QMainWindow):
     # ================================================================== 保存
     def _save_config(self):
         cur = self.projects[self.current].path if 0 <= self.current < len(self.projects) else None
+        for path, view in self.views.items():
+            self._cmd_history[path] = view.command_history()
+        known = {p.path for p in self.projects}
+        history = {p: h for p, h in self._cmd_history.items() if p in known and h}
         err = config.save({
             "projects": [{"path": p.path, "name": p.name} for p in self.projects],
             "current": cur,
@@ -671,7 +817,9 @@ class MainWindow(QMainWindow):
                         "encoding": self.options.encoding,
                         "diff_mode": self.options.diff_mode,
                         "work_mode": self.options.work_mode,
-                        "font_size": self.options.font_size},
+                        "font_size": self.options.font_size,
+                        "pull_mode": self.options.pull_mode},
+            "cmd_history": history,
         })
         if err and err != self._save_error:      # 同一个错误只提示一次，免得每次切换项目都弹
             self.statusBar().showMessage(f"配置保存失败（{config.config_path()}）：{err}", 10000)

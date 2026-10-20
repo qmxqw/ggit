@@ -14,6 +14,7 @@ class ViewOptions:
     diff_mode: str = "unified"   # unified：上下合并；split：左右对照
     work_mode: str = "git"       # git：提交图 + diff；file：文件树 + 文件预览
     font_size: int = FONT_DEFAULT    # 全局字体大小 (pt)，范围 FONT_MIN … FONT_MAX
+    pull_mode: str = "ff-only"   # Pull 的默认方式：ff-only / rebase / merge（见 gitops.PULL_MODES）
 
     def copy(self) -> "ViewOptions":
         return replace(self)

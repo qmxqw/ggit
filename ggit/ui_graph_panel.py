@@ -3,6 +3,7 @@
   * 右上角的下拉框选显示范围：全部分支 / 当前分支 / 只看某个分支（从分支列表里选）
   * 每次读 LOG_PAGE 个提交，滚到底部自动接着读
   * 点提交行就地展开它修改的文件，再点一次收起；点文件行请求打开它的 diff
+  * 提交行右键：新建分支 / 标签、切换到它上面的分支、检出、拣选、撤销、把当前分支重置到这里
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ class GraphPanel(QWidget):
     filesLoaded = Signal(object)                # 某个提交的文件列表读完了：gitcore.Commit
     loadFailed = Signal(str)                    # 读取提交图失败：错误信息
     scopeChanged = Signal(str)                  # 显示范围变了：SCOPE_ALL / SCOPE_AUTO / "ref:完整引用名"
+    commitActionRequested = Signal(str, object, str)    # 提交行右键的操作：(操作, Commit, 参数)，见 commit_actions
 
     def __init__(self, runner: AsyncRunner, repo: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -313,11 +315,40 @@ class GraphPanel(QWidget):
         else:
             a_id = menu.addAction("复制提交 ID")
             a_subject = menu.addAction("复制提交说明")
+            menu.addSeparator()
+            ops = {}
+            reset_menu: QMenu | None = None
+            for op, arg, text in self.commit_actions(item.commit):
+                if op == "-":
+                    menu.addSeparator()
+                    continue
+                target = menu
+                if op.startswith("reset-"):
+                    if reset_menu is None:
+                        reset_menu = menu.addMenu("把当前分支重置到这里")
+                    target = reset_menu
+                ops[target.addAction(text)] = (op, arg)
             chosen = menu.exec(self.view.viewport().mapToGlobal(pos))
             if chosen == a_id:
                 clipboard.setText(item.commit.oid)
             elif chosen == a_subject:
                 clipboard.setText(item.commit.subject)
+            elif chosen in ops:
+                op, arg = ops[chosen]
+                self.commitActionRequested.emit(op, item.commit, arg)
+
+    @staticmethod
+    def commit_actions(c: Commit) -> list[tuple[str, str, str]]:
+        """提交行右键菜单里的写操作：[(操作, 参数, 显示文字)]；操作为 "-" 表示分隔线。"""
+        res = [(("switch", r.name, f"切换到分支 {r.name}")) for r in c.refs if r.kind == "local" and not r.is_head]
+        if res:
+            res.append(("-", "", ""))
+        res += [("branch", "", "在此新建分支…"), ("tag", "", "在此新建标签…"),
+                ("checkout", "", "检出此提交（HEAD 分离）…"), ("-", "", ""),
+                ("cherry-pick", "", "拣选到当前分支（cherry-pick）…"), ("revert", "", "撤销此提交（revert）…"),
+                ("reset-soft", "", "--soft：保留改动并暂存"), ("reset-mixed", "", "--mixed：保留改动，不暂存"),
+                ("reset-hard", "", "--hard：丢掉所有改动…")]
+        return res
 
     # ================================================================ 展开 / 收起提交
     def _toggle(self, row: Row, mode: int) -> None:

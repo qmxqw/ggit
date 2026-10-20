@@ -166,6 +166,19 @@ def _last_fetch_time(repo: str) -> float | None:
         return None
 
 
+def repo_operation(repo: str) -> str:
+    """仓库里进行到一半的操作（有冲突停下来了）：merge / rebase / cherry-pick / revert；没有则返回空串。"""
+    gd = _git_dir(repo)
+    if not gd:
+        return ""
+    if os.path.isdir(os.path.join(gd, "rebase-merge")) or os.path.isdir(os.path.join(gd, "rebase-apply")):
+        return "rebase"
+    for name, op in (("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert")):
+        if os.path.isfile(os.path.join(gd, name)):
+            return op
+    return ""
+
+
 # --------------------------------------------------------------------------
 # 数据结构
 # --------------------------------------------------------------------------
@@ -188,10 +201,15 @@ class RepoStatus:
     changes: list = field(default_factory=list)
     total_changes: int = 0             # 改动文件的真实总数（changes 最多只保留 MAX_CHANGES 个）
     last_fetch: float | None = None
+    operation: str = ""                # 进行到一半的操作：merge / rebase / cherry-pick / revert（没有则空串）
 
     @property
     def dirty(self) -> bool:
         return bool(self.changes)
+
+    @property
+    def conflicts(self) -> int:
+        return sum(1 for c in self.changes if c.kind == "C")
 
 
 @dataclass
@@ -337,6 +355,7 @@ def get_status(repo: str, untracked: str = "all") -> RepoStatus:
     st.total_changes = len(st.changes)
     del st.changes[MAX_CHANGES:]
     st.last_fetch = _last_fetch_time(repo)
+    st.operation = repo_operation(repo)
     return st
 
 

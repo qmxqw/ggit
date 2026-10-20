@@ -5,8 +5,9 @@
 
 布局（git 模式）：
   左：状态行（ui_status）/ 更改（ui_changes）/ 图形（ui_graph_panel）或文件历史（ui_history）
-  右：说明栏 / 文档标签页（ui_docs）/ diff（ui_diff）
-file 模式时左右换成文件树和文件预览（ui_files）。
+  右：说明栏 / 文档标签页（ui_docs）/ diff（ui_diff）；最下面是可收起的命令面板（ui_console）
+file 模式时左右换成文件树和文件预览（ui_files）。命令面板两种模式共用。
+写操作（Fetch / Pull / Push、暂存、提交、分支…）由 ui_ops.GitOps 执行。
 """
 from __future__ import annotations
 
@@ -20,17 +21,19 @@ from PySide6.QtWidgets import QFrame, QLabel, QMessageBox, QSizePolicy, QSplitte
 
 from . import fileutil, gitcore, theme
 from .async_runner import AsyncRunner
-from .gitcore import Commit, CommitFile, FileChange, FileDiff, HistoryEntry, Snapshot
+from .gitcore import BranchInfo, Commit, CommitFile, FileChange, FileDiff, HistoryEntry, Snapshot
 from .options import ViewOptions
 from .ui_branches import BranchMenu
 from .ui_changes import ChangesPanel
 from .ui_common import colored, commit_info_html
+from .ui_console import ConsolePanel
 from .ui_dialogs import PickerDialog
 from .ui_diff import DiffDocument
 from .ui_docs import DocArea
 from .ui_files import FileDocument, FileTreePanel
 from .ui_graph_panel import GraphPanel
 from .ui_history import HistoryPanel
+from .ui_ops import GitOps
 from .ui_status import ProjectStatusBar
 
 _DIFF_EMPTY = ("在左侧点一个文件，查看它的差异。\n\n每点一个文件就新开一个标签，旧的标签不会被关掉；\n"
@@ -42,9 +45,10 @@ _FILE_EMPTY = ("在左侧的文件树里点一个文件，在这里预览。\n\n
 class ProjectView(QWidget):
     statusChanged = Signal(object)      # 状态（分支 / 是否有改动 / ahead-behind）更新后发出：self
     modeToggleRequested = Signal()      # diff 区的“切换模式”按钮被点了
+    opFinished = Signal(object, str, bool, str)     # 写操作结束：self, 操作名称, 是否成功, 一句话说明
 
     def __init__(self, path: str, name: str, runner: AsyncRunner, options: ViewOptions,
-                 parent: QWidget | None = None) -> None:
+                 parent: QWidget | None = None, *, history: list[str] | None = None) -> None:
         super().__init__(parent)
         self.path = path
         self.name = name
@@ -60,6 +64,7 @@ class ProjectView(QWidget):
         self.file_panel: FileTreePanel | None = None    # file 模式的文件树（第一次进入 file 模式时才创建）
         self.file_docs: DocArea | None = None           # file 模式的文档标签页
         self._build_ui()
+        self.console.input.set_history(history or [])
 
     # ================================================================== 界面
     def _build_ui(self) -> None:
@@ -115,7 +120,14 @@ class ProjectView(QWidget):
         rv.addWidget(self.docs, 1)
         self.right_modes = QStackedWidget()         # 0：diff 文档；1：文件预览文档
         self.right_modes.addWidget(right)
-        self.splitter.addWidget(self.right_modes)
+        self.right_split = QSplitter(Qt.Orientation.Vertical)
+        self.right_split.addWidget(self.right_modes)
+        self.console = ConsolePanel()
+        self.console.setVisible(False)
+        self.right_split.addWidget(self.console)
+        self.right_split.setStretchFactor(0, 1)
+        self.right_split.setCollapsible(0, False)
+        self.splitter.addWidget(self.right_split)
 
         self.splitter.setSizes([430, 970])
         self.splitter.setStretchFactor(1, 1)
@@ -136,6 +148,30 @@ class ProjectView(QWidget):
         self.branch_menu.scopeChosen.connect(self._on_branch_chosen)
         self.history.entryActivated.connect(self._on_history_entry)
         self.history.closeRequested.connect(self.close_history)
+
+        # ---------------- 写操作 ----------------
+        self.ops = GitOps(self.runner, self.path, self.console, self, lambda: self.snap,
+                          lambda: self.refresh(force=True), lambda: self.options.pull_mode,
+                          self.branch_menu.branches)
+        self.console.input.branch_source = lambda: [b.name for b in self.branch_menu.branches()]
+        self.console.closeRequested.connect(lambda: self.console.setVisible(False))
+        self.ops.consoleRequested.connect(self.show_console)
+        self.ops.busyChanged.connect(self.status.set_busy)
+        self.ops.busyChanged.connect(self.changes.set_busy)
+        self.ops.commitDone.connect(self.changes.clear_message)
+        self.ops.opFinished.connect(lambda label, ok, detail: self.opFinished.emit(self, label, ok, detail))
+        self.status.fetchRequested.connect(self.ops.fetch)
+        self.status.pullRequested.connect(lambda: self.ops.pull())
+        self.status.pushRequested.connect(lambda: self.ops.push())
+        self.status.continueRequested.connect(self.ops.continue_operation)
+        self.status.abortRequested.connect(self.ops.abort_operation)
+        self.changes.stageRequested.connect(self.ops.stage)
+        self.changes.unstageRequested.connect(self.ops.unstage)
+        self.changes.discardRequested.connect(self.ops.discard)
+        self.changes.commitRequested.connect(self.ops.commit)
+        self.changes.amendToggled.connect(self._on_amend_toggled)
+        self.branch_menu.branchActionRequested.connect(self.branch_action)
+        self.graph_panel.commitActionRequested.connect(self.ops.commit_action)
 
     # ================================================================== 刷新
     def refresh(self, force: bool = False) -> None:
@@ -288,6 +324,46 @@ class ProjectView(QWidget):
         if dlg.exec() and dlg.value:
             self.show_history(dlg.value)
 
+    # ================================================================== 写操作 / 命令面板
+    def show_console(self, focus: bool = False) -> None:
+        if not self.console.isVisible():
+            self.console.setVisible(True)
+            total = max(self.right_split.height(), 400)
+            self.right_split.setSizes([total - total // 3, total // 3])
+        if focus:
+            self.console.focus_input()
+
+    def toggle_console(self) -> None:
+        """Ctrl+`：展开命令面板并把焦点放到输入框；已经展开且焦点在里面就收起。"""
+        if self.console.isVisible() and self.console.input.hasFocus():
+            self.console.setVisible(False)
+        else:
+            self.show_console(focus=True)
+
+    def command_history(self) -> list[str]:
+        return list(self.console.input.history)
+
+    def branch_action(self, op: str, b: BranchInfo) -> None:
+        """分支列表右键菜单里选的操作。"""
+        if op == "switch":
+            self.ops.switch_branch(b)
+        elif op == "merge":
+            self.ops.merge_branch(b)
+        elif op == "rebase":
+            self.ops.rebase_onto(b)
+        elif op == "branch":
+            self.ops.create_branch(b.name, b.name)
+        elif op == "delete":
+            self.ops.delete_branch(b)
+
+    def focus_commit(self) -> None:
+        """Ctrl+K：回到 git 模式，把焦点放到提交说明框。"""
+        self.changes.focus_message()
+
+    def _on_amend_toggled(self, on: bool) -> None:
+        if on:          # 勾上“修改上一次提交”：说明框是空的就填上上一次的说明
+            self.ops.load_last_message(self.changes.set_message_if_empty)
+
     # ================================================================== 给主窗口用
     def set_diff_mode(self, mode: str) -> None:
         self.docs.set_mode(mode)
@@ -296,6 +372,7 @@ class ProjectView(QWidget):
         """全局字号变了：提交图按新行高重新排版，已打开的文档换代码字号。"""
         self.graph_panel.apply_font_size()
         self.changes.refresh_view()
+        self.console.apply_font_size(size)
         for area in (self.docs, self.file_docs):
             if area is not None:
                 for doc in area.all_docs():
@@ -309,6 +386,7 @@ class ProjectView(QWidget):
     def dispose(self) -> None:
         """项目被移除 / 程序退出：取消这个项目所有还在跑的 git 任务。"""
         self._alive = False
+        self.ops.dispose()
         if self._snap_task is not None:
             self.runner.cancel(self._snap_task)
             self._snap_task = None

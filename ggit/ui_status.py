@@ -1,22 +1,38 @@
 """项目页面左上角的状态行。
 
-  第 1 行：分支按钮（点开是分支列表）+ 同步徽标（↑ 领先 / ↓ 落后 / 已同步 / 本地独有）
+  第 1 行：分支按钮（点开是分支列表）+ 同步徽标（↑ 领先 / ↓ 落后 / 已同步 / 本地独有）+ Fetch / Pull / Push 按钮
   第 2 行：上游分支、上次 fetch 时间、本地 / 远端分支数
+  第 3 行（只在合并 / 变基停在冲突上时出现）：进行中的操作、冲突数、“继续”“中止”按钮
 """
 from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
-from . import theme
+from . import gitops, theme
 from .gitcore import Snapshot
 from .ui_common import colored, pill
 from .utils import ago, fmt_time
 
 
+def _tool_button(text: str, tip: str, name: str = "syncButton") -> QToolButton:
+    b = QToolButton()
+    b.setObjectName(name)
+    b.setText(text)
+    b.setToolTip(tip)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    return b
+
+
 class ProjectStatusBar(QFrame):
+    fetchRequested = Signal()
+    pullRequested = Signal()
+    pushRequested = Signal()
+    continueRequested = Signal()
+    abortRequested = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("projectStatusBar")
@@ -38,12 +54,51 @@ class ProjectStatusBar(QFrame):
         self.sync_badge = QLabel()
         r1.addWidget(self.sync_badge)
         r1.addStretch(1)
+        self.fetch_btn = _tool_button("⟳ Fetch", "从所有远端获取最新的提交和分支 (Ctrl+Shift+F)")
+        self.pull_btn = _tool_button("↓ Pull", "拉取上游分支的新提交并合并到当前分支 (Ctrl+Shift+L)")
+        self.push_btn = _tool_button("↑ Push", "把当前分支推送到远端 (Ctrl+Shift+K)")
+        self.fetch_btn.clicked.connect(self.fetchRequested)
+        self.pull_btn.clicked.connect(self.pullRequested)
+        self.push_btn.clicked.connect(self.pushRequested)
+        for b in (self.fetch_btn, self.pull_btn, self.push_btn):
+            r1.addWidget(b)
         sv.addWidget(row1)
 
         self.meta = QLabel("加载中…")
         self.meta.setObjectName("metaText")
         self.meta.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         sv.addWidget(self.meta)
+
+        self.op_row = QWidget()
+        r3 = QHBoxLayout(self.op_row)
+        r3.setContentsMargins(0, 2, 0, 0)
+        r3.setSpacing(6)
+        self.op_label = QLabel()
+        r3.addWidget(self.op_label, 1)
+        self.continue_btn = _tool_button("继续", "冲突都解决并暂存后，继续完成这次操作")
+        self.abort_btn = _tool_button("中止", "放弃这次操作，回到开始之前的状态")
+        self.continue_btn.clicked.connect(self.continueRequested)
+        self.abort_btn.clicked.connect(self.abortRequested)
+        r3.addWidget(self.continue_btn)
+        r3.addWidget(self.abort_btn)
+        self.op_row.setVisible(False)
+        sv.addWidget(self.op_row)
+
+        self._busy = False
+        self._can_pull = False
+        self._can_push = False
+
+    def set_busy(self, busy: bool) -> None:
+        """有写操作在执行：按钮先变灰。"""
+        self._busy = busy
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        self.fetch_btn.setEnabled(not self._busy)
+        self.pull_btn.setEnabled(not self._busy and self._can_pull)
+        self.push_btn.setEnabled(not self._busy and self._can_push)
+        self.continue_btn.setEnabled(not self._busy)
+        self.abort_btn.setEnabled(not self._busy)
 
     def set_branch_menu(self, menu: QMenu) -> None:
         self.branch_btn.setMenu(menu)
@@ -71,6 +126,21 @@ class ProjectStatusBar(QFrame):
         elif not s.upstream and s.branch:
             badges.append(colored("本地独有", theme.TEXT_MUTED))
         self.sync_badge.setText("  ".join(badges))
+
+        self._can_pull = bool(s.branch and s.upstream)
+        self._can_push = bool(s.branch and s.head_oid)
+        self.pull_btn.setText(f"↓ Pull {s.behind}" if s.behind else "↓ Pull")
+        self.push_btn.setText(f"↑ Push {s.ahead}" if s.ahead else "↑ Push")
+        self._update_buttons()
+        if s.operation:
+            name = gitops.OPERATION_NAMES.get(s.operation, s.operation)
+            text = colored(f"⚠ {name}进行中", theme.CONFLICT, bold=True)
+            if s.conflicts:
+                text += "  " + colored(f"{s.conflicts} 个冲突文件待解决", theme.CONFLICT)
+            else:
+                text += "  " + colored("冲突已解决，可以继续", theme.ADDED)
+            self.op_label.setText(text)
+        self.op_row.setVisible(bool(s.operation))
 
         n_local = sum(1 for r in snap.refs if r.startswith("refs/heads/"))
         n_remote = sum(1 for r in snap.refs if r.startswith("refs/remotes/") and not r.endswith("/HEAD"))

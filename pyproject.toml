@@ -35,7 +35,7 @@ no_implicit_optional = true
 
 # 核心层（不依赖界面库）要求每个函数都写类型注解
 [[tool.mypy.overrides]]
-module = ["ggit.gitcore", "ggit.cancel", "ggit.graph", "ggit.difftools", "ggit.items",
+module = ["ggit.gitcore", "ggit.gitops", "ggit.cancel", "ggit.graph", "ggit.difftools", "ggit.items",
           "ggit.fileutil", "ggit.config", "ggit.options", "ggit.utils"]
 disallow_untyped_defs = true
 disallow_incomplete_defs = true

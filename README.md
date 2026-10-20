@@ -1,11 +1,13 @@
 # ggit
 
-多项目 Git **只读**查看工具（Windows，Python + PySide6）。常驻后台，`Alt+G` 随时调出。
+多项目 Git 查看与操作工具（Windows，Python + PySide6）。常驻后台，`Alt+G` 随时调出。
 
 - 顶部：每个项目一个 200 宽的大标签（快捷键序号 + 项目名 + 状态圆点），鼠标悬停显示分支和同步状态
 - **两种工作模式**（`Alt+F` 切换）：
   - **git 模式**：左侧是 git 树（“更改”列表 + 提交图，点提交就地展开它修改的文件），右侧是文档标签页 + diff（上下合并 / 左右对照）
   - **file 模式**：左侧是以项目根目录为起点的文件树，点文件在右侧预览文本 / 代码，可同时打开多个文件
+- **常用 Git 操作**：Fetch / Pull / Push、暂存与提交、分支、储藏（stash）、拣选 / 撤销 / 重置；
+  还有一个**命令面板**（`` Ctrl+` ``），可以直接输入 git 命令执行
 
 ## 运行
 
@@ -48,6 +50,9 @@ python -m ggit
 | 退出文件历史，回到提交图 | `Esc` |
 | 刷新全部项目的状态标记 | `Ctrl+Shift+R` |
 | 放大 / 缩小 / 重置全局字体（7–24 pt，默认 9 pt） | `Ctrl+=` (或 `Ctrl++`) / `Ctrl+-` / `Ctrl+Shift+0` |
+| Fetch / Pull / Push | `Ctrl+Shift+F` / `Ctrl+Shift+L` / `Ctrl+Shift+K`（或状态行右侧的按钮） |
+| 填写提交说明 / 提交 | `Ctrl+K` / 在说明框里按 `Ctrl+Enter` |
+| 展开 / 收起命令面板 | `` Ctrl+` `` |
 
 顶部标签：左边的数字是 `Ctrl+数字` 的序号；右边**黄色圆点** = 有未提交改动，**红色圆点** = 读取项目状态失败。
 鼠标悬停在标签上，会显示路径、分支、是否有未提交改动、领先 / 落后远端几个提交。
@@ -81,15 +86,45 @@ python -m ggit
     点色块直接跳过去，点空白处跳到对应位置。
   - 特别大的差异（超过 10MB 或 3 万行；未跟踪的新文件超过 3 万行）只显示前面一部分：
     末尾有一行“已自动截断”的提示，标题栏的增删统计后面也会标出“（已截断）”。
-- **离线**：远端分支、ahead/behind 全部来自本地已有的远端引用，ggit 不联网、不 fetch、不写任何 Git 数据。
-  左上角的状态行显示“上次 fetch”时间。别的程序（比如 Antigravity）fetch 之后，在 ggit 里按 `F5` 就能看到新的远端分支。
+- **联网**：只有你点 Fetch / Pull / Push（或在命令面板里执行联网的命令）时才联网；平时远端分支、ahead/behind
+  都来自本地已有的远端引用。左上角的状态行显示“上次 fetch”时间。别的程序 fetch 之后，在 ggit 里按 `F5` 就能看到。
 - **自动刷新**：窗口重新被激活、或切换项目时，自动刷新当前项目。在别的程序里操作完仍没看到变化，按 `F5`。
 - **编码**：默认逐行自动检测，先 UTF-8，失败再 GBK；“查看 → 文件编码”里可强制指定。
 - **查看菜单**：可忽略空白差异、忽略换行符（CRLF/LF）差异。
 
+## Git 操作
+
+所有写操作的输出都显示在右下角的**命令面板**里（失败时自动展开）；执行完自动刷新。
+同一个项目同一时间只执行一个操作（执行中按钮变灰，面板标题栏有“■ 取消”）；不同项目互不影响。
+窗口隐藏在后台时，操作的结果用托盘通知。
+
+- **Fetch / Pull / Push**：状态行右侧的按钮，按钮上显示落后 / 领先的提交数；也在“Git”菜单里。
+  - Fetch = `git fetch --all --prune`。“Git → Fetch 全部项目”（托盘菜单里也有）对所有项目执行一遍。
+  - Pull 默认 `--ff-only`：有分叉时直接报错，不会自动产生合并提交；可以在“Git → Pull 的默认方式”改成 rebase 或 merge，
+    菜单里也能临时选一次 rebase / merge 方式。
+  - Push：分支还没有上游时，先确认，再 `push -u <远端> <分支>`（远端优先用 `remote.pushDefault`，其次 origin）。
+    强制推送只在菜单里，用 `--force-with-lease` 并要求确认。
+- **暂存与提交**：“更改”列表每行前面的勾选框 = 是否暂存（半勾 = 暂存后又改过），点一下暂存 / 取消暂存；
+  右键（可多选）有暂存、取消暂存、放弃改动；标题栏有“全部暂存 / 全部取消”。
+  下面的说明框填好后点“提交”或按 `Ctrl+Enter`；没有暂存任何文件时会询问是否全部暂存后提交。
+  勾选“修改上一次提交”= amend，说明框为空时自动填入上一次的说明。
+- **分支**：分支列表（`Ctrl+B`）里在分支上**点右键**：切换、合并到当前分支、变基、基于它新建分支、删除
+  （远端分支：检出为本地分支、删除远端分支）。“Git”菜单里也有切换 / 新建 / 合并 / 删除分支（弹出搜索框选择）。
+- **提交图右键**：在此新建分支 / 标签、切换到这个提交上的分支、检出此提交、拣选（cherry-pick）、撤销（revert）、
+  把当前分支重置到这里（soft / mixed / hard）。
+- **储藏**：“Git”菜单里储藏改动（含未跟踪文件）、恢复最近的储藏、储藏列表（选一个恢复 / 删除）。
+- **冲突**：pull / 合并 / 变基停在冲突上时，状态行下方出现一行提示和“继续”“中止”按钮。
+  解决冲突后在“更改”里勾选暂存这些文件，再点“继续”。
+- **命令面板**（`` Ctrl+` ``）：输入 git 命令回车执行，开头的 `git` 可写可不写；`↑` / `↓` 翻历史（每个项目分开保存），
+  `Tab` 补全子命令和分支名。只执行 git，不经过 shell（`|`、`&&`、`>` 没有特殊含义）。
+  - 需要交互的命令不执行并说明原因：`rebase -i`、`add -p`、不带 `-m` 的 `commit`、`gui`、`mergetool` 等。
+  - 会丢数据的命令先确认：`reset --hard`、`clean -f`、`push --force`、`branch -D`、`checkout -- 文件`、`stash drop` 等。
+- **认证**：HTTPS 交给 Git Credential Manager（需要时会弹出它自己的登录窗口）；SSH 需要 ssh-agent 里已经加载了密钥
+  （ggit 不会询问密钥密码，没有时直接报错）。如果你自己设置了 `core.sshCommand` 或 `GIT_SSH_COMMAND`，按你的设置来。
+
 ## 配置文件
 
-`%APPDATA%\ggit\config.json`（项目列表、当前项目、窗口位置、显示选项、diff 模式、字体大小）。
+`%APPDATA%\ggit\config.json`（项目列表、当前项目、窗口位置、显示选项、diff 模式、字体大小、Pull 方式、命令历史）。
 
 程序出现未处理的异常时，会弹出提示并把详细信息追加到同一目录下的 `crash.log`。
 
@@ -121,7 +156,7 @@ python tools/check.py
 `tools/check.py` 依次运行三项检查，全部通过才算通过：
 
 - **ruff**：代码风格和常见隐患（规则见 `pyproject.toml`）
-- **mypy**：类型检查；核心层（`gitcore`、`cancel`、`graph`、`difftools`、`items`、`fileutil`、`config`、
+- **mypy**：类型检查；核心层（`gitcore`、`gitops`、`cancel`、`graph`、`difftools`、`items`、`fileutil`、`config`、
   `options`、`utils`）要求每个函数都写类型注解
 - **pytest**：核心层用真实的临时 Git 仓库测试；界面层的测试在 Qt 的 offscreen 平台上运行真实的窗口，
   只通过公开接口操作和检查。测试不会在桌面上弹出窗口、托盘图标或通知，不注册全局热键，
@@ -138,7 +173,8 @@ python tools/check.py
 ggit/
   —— 核心层（不依赖界面库）——
   gitcore.py         调用 git、解码（UTF-8/GBK）、解析 status / log / diff / 文件历史 / 分支列表
-  cancel.py          取消后台 git 任务（gitcore 用它结束正在运行的子进程）
+  gitops.py          写操作：执行 git 并实时回传输出、命令拆分与危险检查、常用操作的参数
+  cancel.py          取消后台 git 任务（结束正在运行的子进程，写操作连同它的子进程一起结束）
   graph.py           提交图的分支线布局算法
   difftools.py       diff 加工：裁剪成“只看改动处”、左右对照对齐、改动分段
   items.py           提交图列表条目（提交行 + 展开的文件行）
@@ -150,9 +186,11 @@ ggit/
   ui_main.py         主窗口：顶部项目导航、菜单、托盘、全局热键、字体缩放
   ui_nav.py          顶部 200 宽的项目大标签（可拖动排序）
   ui_project.py      单个项目的页面：组装下面这些面板，负责刷新和它们之间的联动
-  ui_status.py         左上角的状态行（分支按钮、同步徽标、上游与 fetch 时间）
+  ui_status.py         左上角的状态行（分支按钮、同步徽标、Fetch / Pull / Push、冲突时的继续 / 中止）
   ui_branches.py       分支下拉列表（Ctrl+B）
-  ui_changes.py        “更改”面板（未提交的文件）
+  ui_changes.py        “更改”面板（未提交的文件、暂存勾选框、提交说明框）
+  ui_console.py        命令面板（输入 git 命令、显示所有写操作的输出）
+  ui_ops.py            一个项目的写操作：确认对话框、同一时间只执行一个、完成后刷新
   ui_graph_panel.py    “图形”面板：显示范围、分页加载、展开 / 收起提交
   ui_history.py        “文件历史”面板
   ui_graph.py        提交图列表（模型 + 自绘）
@@ -162,14 +200,14 @@ ggit/
   ui_dialogs.py      快速选择对话框（Ctrl+P / Ctrl+F）
   ui_common.py       各面板共用的小部件和 HTML 片段
   theme.py           深色主题：全部颜色和样式表（按控件 objectName 匹配）
-  async_runner.py    后台线程执行 git，结果回到界面线程
+  async_runner.py    后台线程执行 git，结果回到界面线程；写操作用单独的线程池，输出边执行边送回
   winhotkey.py       Windows 全局热键与“置顶显示”
   icon.py / icon_data.py   程序图标（内嵌）
 tools/
   check.py           一条命令跑完 ruff + mypy + pytest
   make_icon.py       重新生成图标
 tests/
-  support.py         测试共用：offscreen 平台、临时配置文件、临时 Git 仓库、等待后台任务
+  support.py         测试共用：offscreen 平台、临时配置文件、临时 Git 仓库（含裸仓库远端）、等待后台任务
 pyproject.toml       ruff / mypy / pytest 的配置
 requirements.txt     运行依赖；requirements-dev.txt：开发依赖
 ```

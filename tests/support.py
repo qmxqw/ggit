@@ -60,6 +60,38 @@ def init_repo(path: str) -> str:
     return path
 
 
+def clone_pair(tmp: TempDir) -> tuple[str, str, str]:
+    """一个裸仓库当远端（main 分支上有一个提交），再克隆出两份：返回 (远端, 克隆 a, 克隆 b)。"""
+    remote = tmp.sub("remote.git")
+    git(tmp.path, "init", "-q", "--bare", "-b", "main", remote)
+    seed = init_repo(tmp.sub("seed"))
+    write(seed, "a.txt", "base\n")
+    commit(seed, "base")
+    git(seed, "push", "-q", remote, "main")
+    a, b = tmp.sub("a"), tmp.sub("b")
+    git(tmp.path, "clone", "-q", remote, a)
+    git(tmp.path, "clone", "-q", remote, b)
+    return remote, a, b
+
+
+class GitEnv:
+    """让 ggit 自己启动的 git（写操作）也用测试的身份，并且不读用户的全局 / 系统 git 配置。用完调用 restore()。"""
+    KEYS = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+            "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
+
+    def __init__(self) -> None:
+        self._saved = {k: os.environ.get(k) for k in self.KEYS}
+        for k in self.KEYS:
+            os.environ[k] = GIT_ENV[k]
+
+    def restore(self) -> None:
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 class TempDir:
     """临时目录；用完调用 cleanup()（Windows 上 git 偶尔还占着文件，删不掉就算了）。"""
 
