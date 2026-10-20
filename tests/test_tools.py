@@ -1,14 +1,14 @@
-"""difftools / items 的测试（纯 Python，不需要 git 和界面库）。"""
-import os
-import sys
+"""difftools / items / utils 的测试（纯 Python，不需要界面库）。"""
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from support import TempDir, commit, init_repo, write
 
-from ggit.difftools import build_split, change_groups, trim_context  # noqa: E402
-from ggit.gitcore import Commit, CommitFile, DiffLine  # noqa: E402
-from ggit.graph import GraphRow  # noqa: E402
-from ggit.items import FileRow, ItemList, Row  # noqa: E402
+from ggit import gitcore
+from ggit.difftools import build_split, change_groups, trim_context
+from ggit.gitcore import Commit, CommitFile, DiffLine
+from ggit.graph import GraphRow
+from ggit.items import ItemList, Row
+from ggit.utils import LruCache
 
 
 def L(kind, old, new, text=""):
@@ -20,23 +20,23 @@ def numbered(n, changes):
     lines, o, nw = [], 1, 1
     for i in range(1, n + 1):
         c = changes.get(i)
-        if c == "del":
-            lines.append(L("del", o, None, f"old{i}")); o += 1
-        elif c == "add":
-            lines.append(L("add", None, nw, f"new{i}")); nw += 1
-        elif c == "mod":
-            lines.append(L("del", o, None, f"old{i}")); o += 1
-            lines.append(L("add", None, nw, f"new{i}")); nw += 1
-        else:
-            lines.append(L("ctx", o, nw, f"line{i}")); o += 1; nw += 1
+        if c in ("del", "mod"):
+            lines.append(L("del", o, None, f"old{i}"))
+            o += 1
+        if c in ("add", "mod"):
+            lines.append(L("add", None, nw, f"new{i}"))
+            nw += 1
+        if c is None:
+            lines.append(L("ctx", o, nw, f"line{i}"))
+            o += 1
+            nw += 1
     return lines
 
 
 class DiffToolsTest(unittest.TestCase):
     def test_trim_context(self):
-        lines = numbered(30, {15: "mod"})
-        out = trim_context(lines, 3)
-        kinds = [l.kind for l in out]
+        out = trim_context(numbered(30, {15: "mod"}), 3)
+        kinds = [ln.kind for ln in out]
         self.assertEqual(kinds[0], "hunk")
         self.assertEqual(kinds.count("ctx"), 6)          # 前后各 3 行
         self.assertEqual(out[0].text, "@@ -12,7 +12,7 @@")
@@ -44,16 +44,15 @@ class DiffToolsTest(unittest.TestCase):
 
     def test_trim_context_two_hunks_and_merge(self):
         far = trim_context(numbered(40, {5: "add", 35: "del"}), 3)
-        self.assertEqual(sum(l.kind == "hunk" for l in far), 2)
+        self.assertEqual(sum(ln.kind == "hunk" for ln in far), 2)
         near = trim_context(numbered(40, {5: "add", 9: "del"}), 3)    # 间隔小于 2n：合并成一段
-        self.assertEqual(sum(l.kind == "hunk" for l in near), 1)
+        self.assertEqual(sum(ln.kind == "hunk" for ln in near), 1)
 
     def test_trim_no_changes(self):
         self.assertEqual(trim_context(numbered(10, {}), 3), [])
 
     def test_trim_new_file(self):
-        lines = [L("add", None, i, f"x{i}") for i in range(1, 4)]
-        out = trim_context(lines)
+        out = trim_context([L("add", None, i, f"x{i}") for i in range(1, 4)])
         self.assertEqual(out[0].text, "@@ -0,0 +1,3 @@")
 
     def test_build_split_alignment(self):
@@ -76,13 +75,14 @@ class DiffToolsTest(unittest.TestCase):
         out = trim_context(lines, 3)
         self.assertEqual((out[-1].kind, out[-1].text), ("note", "截断了"))
         rows = build_split(lines)
-        self.assertEqual(rows[-1].left.text, "截断了")
+        last = rows[-1].left
+        assert last is not None
+        self.assertEqual(last.text, "截断了")
         self.assertIs(rows[-1].left, rows[-1].right)
 
     def test_trim_note_between_sections(self):
         sec2 = [L("note", None, None, "b/other")] + numbered(20, {15: "del"})
-        out = trim_context(numbered(20, {3: "add"}) + sec2, 3)
-        kinds = [l.kind for l in out]
+        kinds = [ln.kind for ln in trim_context(numbered(20, {3: "add"}) + sec2, 3)]
         self.assertEqual(kinds.count("hunk"), 2)
         self.assertEqual(kinds.count("note"), 1)
         self.assertLess(kinds.index("hunk"), kinds.index("note"))
@@ -147,37 +147,56 @@ class ItemListTest(unittest.TestCase):
         self.assertEqual(self.lst.collapse("zzz"), (0, -1))
 
 
+class LruCacheTest(unittest.TestCase):
+    def test_evicts_least_recently_used(self):
+        c: LruCache[str, int] = LruCache(2)
+        c.put("a", 1)
+        c.put("b", 2)
+        self.assertEqual(c.get("a"), 1)          # a 刚用过，b 变成最旧的
+        c.put("c", 3)
+        self.assertNotIn("b", c)
+        self.assertEqual((c.get("a"), c.get("c"), len(c)), (1, 3, 2))
+
+    def test_keep_is_never_evicted(self):
+        c: LruCache[str, int] = LruCache(3)
+        c.put("keep", 0)
+        for i in range(10):
+            c.put(f"k{i}", i, keep={"keep"})
+        self.assertEqual(len(c), 3)
+        self.assertIn("keep", c)
+        self.assertEqual(c.peek("k9"), 9)
+
+    def test_peek_does_not_refresh(self):
+        c: LruCache[str, int] = LruCache(2)
+        c.put("a", 1)
+        c.put("b", 2)
+        self.assertEqual(c.peek("a"), 1)
+        c.put("c", 3)
+        self.assertNotIn("a", c)
+        self.assertIsNone(c.get("a"))
+
+
 class IntegrationTest(unittest.TestCase):
     """用真实仓库的完整上下文 diff 走一遍：裁剪 + 对照。"""
 
     def test_with_real_repo(self):
-        import shutil, subprocess, tempfile
-        from ggit import gitcore
-        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e", GIT_COMMITTER_NAME="t",
-                   GIT_COMMITTER_EMAIL="t@e", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
-        tmp = tempfile.mkdtemp()
-        try:
-            def g(*a):
-                subprocess.run(["git", *a], cwd=tmp, env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            g("init", "-q", "-b", "main")
-            with open(os.path.join(tmp, "f.txt"), "w") as f:
-                f.write("".join(f"line{i}\n" for i in range(1, 41)))
-            g("add", "-A"); g("commit", "-q", "-m", "one")
-            with open(os.path.join(tmp, "f.txt"), "w") as f:
-                f.write("".join(f"line{i}\n" if i != 20 else "CHANGED\nEXTRA\n" for i in range(1, 41)))
-            g("add", "-A"); g("commit", "-q", "-m", "two")
-            oid = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=tmp, env=env).decode().strip()
-            fd = gitcore.get_commit_diff(tmp, oid, ["f.txt"])
-            self.assertEqual(len([l for l in fd.lines if l.kind == "ctx"]), 39)     # 整个文件的上下文都在
-            trimmed = trim_context(fd.lines, 3)
-            self.assertEqual(len([l for l in trimmed if l.kind == "ctx"]), 6)
-            rows = build_split(fd.lines)
-            self.assertEqual(len(rows), 41)                                         # 39 行不变 + 1 对替换 + 1 行新增
-            self.assertIsNone(rows[20].left)                                         # 第 21 行：新增的 EXTRA，左边补空行
-            self.assertEqual(rows[19].left.text, "line20")
-            self.assertEqual(rows[19].right.text, "CHANGED")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        tmp = TempDir()
+        self.addCleanup(tmp.cleanup)
+        repo = init_repo(tmp.sub("r"))
+        write(repo, "f.txt", "".join(f"line{i}\n" for i in range(1, 41)))
+        commit(repo, "one")
+        write(repo, "f.txt", "".join(f"line{i}\n" if i != 20 else "CHANGED\nEXTRA\n" for i in range(1, 41)))
+        oid = commit(repo, "two")
+        fd = gitcore.get_commit_diff(repo, oid, ["f.txt"])
+        self.assertEqual(len([ln for ln in fd.lines if ln.kind == "ctx"]), 39)     # 整个文件的上下文都在
+        trimmed = trim_context(fd.lines, 3)
+        self.assertEqual(len([ln for ln in trimmed if ln.kind == "ctx"]), 6)
+        rows = build_split(fd.lines)
+        self.assertEqual(len(rows), 41)                                         # 39 行不变 + 1 对替换 + 1 行新增
+        self.assertIsNone(rows[20].left)                                         # 第 21 行：新增的 EXTRA，左边补空行
+        left, right = rows[19].left, rows[19].right
+        assert left is not None and right is not None
+        self.assertEqual((left.text, right.text), ("line20", "CHANGED"))
 
 
 if __name__ == "__main__":

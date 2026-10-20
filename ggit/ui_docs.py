@@ -7,13 +7,46 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMenu, QStackedWidget, QTabBar,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QStackedWidget, QTabBar, QVBoxLayout, QWidget
+
+from .async_runner import AsyncRunner
+from .options import ViewOptions
+
+
+class DocView(QWidget):
+    """一个标签页里显示的内容（DiffDocument、FileDocument）都要实现的接口。"""
+    modeToggleRequested = Signal()      # diff 视图里“切换模式”按钮被点了（文件预览不会发出）
+
+    def set_title(self, text: str) -> None:
+        raise NotImplementedError
+
+    def set_message(self, text: str) -> None:
+        """不显示内容，只在中间显示一句话（加载中、出错了…）。"""
+        raise NotImplementedError
+
+    def show_result(self, result: Any, keep_scroll: bool = False) -> None:
+        """显示后台读到的结果（FileDiff / FileContent）。"""
+        raise NotImplementedError
+
+    @staticmethod
+    def result_signature(result: Any) -> object:
+        """结果的签名：自动刷新时签名没变就不重绘。"""
+        raise NotImplementedError
+
+    def apply_font_size(self, size: int) -> None:
+        raise NotImplementedError
+
+    def set_mode(self, mode: str) -> None:
+        """切换 diff 模式（上下合并 / 左右对照）；没有模式的视图什么也不做。"""
+
+    def goto_change(self, forward: bool = True) -> None:
+        """跳到下一处 / 上一处改动；没有改动概念的视图什么也不做。"""
 
 
 @dataclass(eq=False)
@@ -22,13 +55,13 @@ class Doc:
     title: str
     tip: str
     kind: str                      # commit / work / file
-    fn: Optional[Callable]         # fn(options) -> 结果对象，在后台线程里调用
+    fn: Callable[[ViewOptions], Any] | None     # fn(options) -> 结果对象，在后台线程里调用
     info: str                      # 显示在内容区上方的说明（HTML，只有 git 模式用）
-    view: QWidget                  # DiffDocument 或 FileDocument
+    view: DocView                  # DiffDocument 或 FileDocument
     data: object = None
     token: int = 0                 # 每次加载 +1，用来丢弃过期的结果
     sig: object = None             # 上次显示内容的签名：自动刷新时内容没变就不重绘
-    task_id: Optional[int] = None  # 正在运行的后台任务 ID（读完后清空）
+    task_id: int | None = None  # 正在运行的后台任务 ID（读完后清空）
     loaded_at: float = 0.0         # 最近一次读取完成的时间（time.monotonic）
 
 
@@ -51,12 +84,13 @@ class DocArea(QWidget):
     infoChanged = Signal(str)          # 当前文档变了：把它的说明交给上层显示
     modeToggleRequested = Signal()
 
-    def __init__(self, runner, options, view_factory: Callable, empty_text: str, parent=None):
+    def __init__(self, runner: AsyncRunner, options: ViewOptions, view_factory: Callable[[], DocView],
+                 empty_text: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.runner = runner
         self.options = options
         self._view_factory = view_factory
-        self._docs: dict = {}
+        self._docs: dict[str, Doc] = {}
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -92,7 +126,7 @@ class DocArea(QWidget):
         self.tabbar.customContextMenuRequested.connect(self._menu)
 
     # ------------------------------------------------------------ 查询
-    def _key_at(self, i: int) -> Optional[str]:
+    def _key_at(self, i: int) -> str | None:
         return self.tabbar.tabData(i) if 0 <= i < self.tabbar.count() else None
 
     def _index_of(self, key: str) -> int:
@@ -101,26 +135,28 @@ class DocArea(QWidget):
                 return i
         return -1
 
-    def doc_at(self, i: int) -> Optional[Doc]:
-        return self._docs.get(self._key_at(i))
+    def doc_at(self, i: int) -> Doc | None:
+        key = self._key_at(i)
+        return self._docs.get(key) if key is not None else None
 
-    def current_doc(self) -> Optional[Doc]:
+    def current_doc(self) -> Doc | None:
         return self.doc_at(self.tabbar.currentIndex())
 
-    def get(self, key: str) -> Optional[Doc]:
+    def get(self, key: str) -> Doc | None:
         return self._docs.get(key)
 
-    def all_docs(self) -> list:
+    def all_docs(self) -> list[Doc]:
         return list(self._docs.values())
 
-    def docs_of_kind(self, kind: str) -> list:
+    def docs_of_kind(self, kind: str) -> list[Doc]:
         return [d for d in self._docs.values() if d.kind == kind]
 
     def count(self) -> int:
         return len(self._docs)
 
     # ------------------------------------------------------------ 打开
-    def open_doc(self, key: str, title: str, tip: str, kind: str, fn, info: str, data=None) -> Doc:
+    def open_doc(self, key: str, title: str, tip: str, kind: str, fn: Callable[[ViewOptions], Any] | None,
+                 info: str, data: object = None) -> Doc:
         """打开一个文档：已经开着就切过去，没开就新开一个标签。从不关闭别的标签。"""
         doc = self._docs.get(key)
         if doc is not None:
@@ -182,7 +218,7 @@ class DocArea(QWidget):
     def _alive(self, doc: Doc, tok: int) -> bool:
         return self._docs.get(doc.key) is doc and doc.token == tok
 
-    def _on_loaded(self, doc: Doc, tok: int, result, quiet: bool) -> None:
+    def _on_loaded(self, doc: Doc, tok: int, result: Any, quiet: bool) -> None:
         if not self._alive(doc, tok):
             return
         doc.task_id = None
@@ -193,7 +229,7 @@ class DocArea(QWidget):
         doc.sig = sig
         doc.view.show_result(result, keep_scroll=quiet)
 
-    def _on_error(self, doc: Doc, tok: int, err) -> None:
+    def _on_error(self, doc: Doc, tok: int, err: BaseException) -> None:
         if self._alive(doc, tok):
             doc.task_id = None
             doc.sig = None                  # 再次打开时重试

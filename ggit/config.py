@@ -22,7 +22,7 @@ def crash_log_path() -> str:
 
 def load() -> dict:
     try:
-        with open(config_path(), "r", encoding="utf-8") as f:
+        with open(config_path(), encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):

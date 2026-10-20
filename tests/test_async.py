@@ -1,19 +1,18 @@
-"""AsyncRunner 任务调度与取消机制的单元测试。"""
-import os
+"""AsyncRunner：后台执行、取消、回调里的异常处理。"""
 import sys
 import time
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import support
 
-from PySide6.QtWidgets import QApplication
-from ggit.async_runner import AsyncRunner, CancellationToken
+from ggit.async_runner import AsyncRunner
+from ggit.cancel import CancellationToken
 
 
-class AsyncRunnerTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication(sys.argv)
+class AsyncRunnerTest(support.QtTestCase):
+    def setUp(self):
+        self.runner = AsyncRunner()
+        self.addCleanup(self.runner.shutdown)
 
     def test_cancel_token(self):
         token = CancellationToken()
@@ -21,51 +20,54 @@ class AsyncRunnerTest(unittest.TestCase):
         token.cancel()
         self.assertTrue(token.cancelled)
 
-    def test_submit_and_cancel_before_run(self):
-        runner = AsyncRunner()
-        results = []
+    def test_cancelled_job_has_no_callback(self):
+        results: list[object] = []
 
         def work():
             time.sleep(0.05)
             return "ok"
 
-        tok = runner.submit(work, on_ok=lambda r: results.append(r))
-        runner.cancel(tok)
-        runner.shutdown()
-        # 结果应被丢弃，不回调
+        tok = self.runner.submit(work, on_ok=results.append)
+        self.runner.cancel(tok)
+        self.runner.shutdown()          # 等后台线程跑完
+        self.app.processEvents()
         self.assertEqual(results, [])
 
-    def test_submit_and_success(self):
-        runner = AsyncRunner()
-        results = []
+    def test_result_reaches_ui_thread(self):
+        results: list[object] = []
+        self.runner.submit(lambda: 42, on_ok=results.append)
+        support.wait_until(lambda: results == [42])
 
-        def work():
-            return 42
+    def test_error_goes_to_on_err(self):
+        errors: list[BaseException] = []
 
-        runner.submit(work, on_ok=lambda r: results.append(r))
-        # 处理 Qt 事件循环让跨线程信号送达
-        for _ in range(50):
-            self.app.processEvents()
-            if results:
-                break
-            time.sleep(0.02)
-        runner.shutdown()
-        self.assertEqual(results, [42])
+        def fail():
+            raise ValueError("boom")
+
+        self.runner.submit(fail, on_ok=lambda _r: None, on_err=errors.append)
+        support.wait_until(lambda: len(errors) == 1)
+        self.assertIsInstance(errors[0], ValueError)
 
     def test_callback_errors(self):
-        runner = AsyncRunner()
-        # 界面对象已销毁：忽略
-        runner._on_finished(1, None, None)
-        runner._callbacks[2] = (lambda r: (_ for _ in ()).throw(
-            RuntimeError("Internal C++ object (QLabel) already deleted.")), None)
-        runner._on_finished(2, "x", None)
-        # 其它 RuntimeError 是真正的程序错误：不能悄悄吞掉
-        def boom(_r):
+        """回调所属的界面对象已销毁：忽略；其它异常是真正的程序错误，交给全局异常处理。"""
+        seen: list[str] = []
+        old_hook = sys.excepthook
+        sys.excepthook = lambda _t, v, _tb: seen.append(str(v))
+        self.addCleanup(setattr, sys, "excepthook", old_hook)
+        called: list[str] = []
+
+        def deleted(_r):
+            called.append("deleted")
+            raise RuntimeError("Internal C++ object (QLabel) already deleted.")
+
+        def bug(_r):
+            called.append("bug")
             raise RuntimeError("real bug")
-        runner._callbacks[3] = (boom, None)
-        with self.assertRaises(RuntimeError):
-            runner._on_finished(3, "x", None)
-        runner.shutdown()
+
+        self.runner.submit(lambda: 1, deleted)
+        self.runner.submit(lambda: 2, bug)
+        support.wait_until(lambda: len(called) == 2)
+        self.assertEqual(seen, ["real bug"])
 
 
 if __name__ == "__main__":

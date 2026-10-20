@@ -33,6 +33,7 @@ def _install_excepthook() -> None:
         import os
         import traceback
         from datetime import datetime
+
         from . import config
 
         log_file = config.crash_log_path()
@@ -99,7 +100,8 @@ def main() -> int:
     if not gitcore.find_git():
         QMessageBox.critical(
             None, "ggit",
-            "未找到 git 命令。\n\n请先安装 Git for Windows（https://git-scm.com），\n并确保 git 在 PATH 中，然后重新打开 ggit。")
+            "未找到 git 命令。\n\n请先安装 Git for Windows（https://git-scm.com），\n"
+            "并确保 git 在 PATH 中，然后重新打开 ggit。")
         return 1
 
     from .ui_main import MainWindow

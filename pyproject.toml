@@ -1,0 +1,49 @@
+# ggit 的开发工具配置（运行 ggit 本身不需要这个文件）。
+# 一条命令跑完全部检查：python tools/check.py
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+extend-exclude = ["ggit/icon_data.py"]   # 自动生成的图标数据
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes：未使用的导入 / 变量、未定义的名字
+    "I",        # import 排序
+    "B",        # bugbear：常见的隐患写法
+    "UP",       # pyupgrade：用 Python 3.10 的写法
+    "SIM",      # 可以写得更简单的地方
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ggit"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Qt 的写法：rowCount(self, parent=QModelIndex()) 这类默认参数是不可变的值
+extend-immutable-calls = ["PySide6.QtCore.QModelIndex"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["ggit", "tests", "tools"]
+exclude = ["ggit/icon_data\\.py$"]
+mypy_path = "tests"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+
+# 核心层（不依赖界面库）要求每个函数都写类型注解
+[[tool.mypy.overrides]]
+module = ["ggit.gitcore", "ggit.cancel", "ggit.graph", "ggit.difftools", "ggit.items",
+          "ggit.fileutil", "ggit.config", "ggit.options", "ggit.utils"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+# tools/make_icon.py 只在重新生成图标时才用到 Pillow / numpy，开发依赖里不装它们
+[[tool.mypy.overrides]]
+module = ["PIL.*", "numpy.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

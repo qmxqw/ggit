@@ -40,3 +40,8 @@ Thumbs.db
 # Review package
 pack_review.pyw
 src.zip
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/

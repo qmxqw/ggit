@@ -11,12 +11,24 @@ import time
 
 from PySide6.QtCore import QByteArray, Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
-                               QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QStackedWidget,
-                               QSystemTrayIcon,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPlainTextEdit,
+    QStackedWidget,
+    QSystemTrayIcon,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
-from . import __version__, config, gitcore, winhotkey
+from . import __version__, config, gitcore, theme, winhotkey
 from .async_runner import AsyncRunner
 from .icon import app_icon
 from .options import FONT_DEFAULT, FONT_MAX, FONT_MIN, ViewOptions
@@ -29,10 +41,11 @@ MAX_TABS = 10
 
 
 def _inside_code_view(w: QWidget) -> bool:
-    while w is not None:
-        if isinstance(w, QPlainTextEdit):
+    node: QWidget | None = w
+    while node is not None:
+        if isinstance(node, QPlainTextEdit):
             return True
-        w = w.parentWidget()
+        node = node.parentWidget()
     return False
 
 
@@ -60,7 +73,8 @@ def badge_from_status(s) -> Badge:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, *, system_integration: bool = True):
+        """system_integration=False：不建托盘图标、不注册全局热键（测试用，免得影响真实桌面）。"""
         super().__init__()
         self.setWindowTitle("ggit")
         self.setWindowIcon(app_icon())
@@ -103,7 +117,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._build_shortcuts()
-        self._build_tray()
+        self.tray: QSystemTrayIcon | None = None
+        if system_integration:
+            self._build_tray()
 
         geo = cfg.get("geometry")
         if isinstance(geo, str):
@@ -116,11 +132,13 @@ class MainWindow(QMainWindow):
         if self.current >= 0:
             self.switch_to(self.current)
         self._refresh_badges(force=True)
-        QApplication.instance().applicationStateChanged.connect(self._on_app_state)
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            app.applicationStateChanged.connect(self._on_app_state)
 
         # 全局热键 Alt+G：显示到最前面 / 隐藏到后台
         self.hotkey = winhotkey.GlobalHotkey(self.toggle_visibility)
-        if not self.hotkey.register() and winhotkey.IS_WIN:
+        if system_integration and not self.hotkey.register() and winhotkey.IS_WIN:
             self.statusBar().showMessage("全局热键 Alt+G 注册失败（可能被其它程序占用）", 8000)
 
     # ================================================================== 搭界面
@@ -163,7 +181,8 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.empty_page)
         v.addWidget(self.stack, 1)
         self.setCentralWidget(central)
-        self.statusBar().showMessage("Ctrl+1…0 切换项目 · F5 刷新 · Alt+F 切换 git / 文件模式 · Alt+D 切换 diff 模式 · Alt+G 显示/隐藏")
+        self.statusBar().showMessage("Ctrl+1…0 切换项目 · F5 刷新 · Alt+F 切换 git / 文件模式 · "
+                                     "Alt+D 切换 diff 模式 · Alt+G 显示/隐藏")
 
     def _act(self, menu, text, shortcut, slot, checkable=False, checked=False):
         act = QAction(text, self)
@@ -232,7 +251,7 @@ class MainWindow(QMainWindow):
 
     def _build_shortcuts(self):
         for i in range(MAX_TABS):
-            sc = QShortcut(QKeySequence("Ctrl+%d" % ((i + 1) % 10)), self)
+            sc = QShortcut(QKeySequence(f"Ctrl+{(i + 1) % 10}"), self)
             sc.activated.connect(lambda i=i: self.switch_to(i))
         nxt = QShortcut(QKeySequence("Ctrl+Tab"), self)
         nxt.activated.connect(lambda: self._cycle(1))
@@ -244,7 +263,6 @@ class MainWindow(QMainWindow):
 
     # ================================================================== 托盘 / 后台
     def _build_tray(self):
-        self.tray = None
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         self.tray = QSystemTrayIcon(app_icon(), self)
@@ -429,14 +447,15 @@ class MainWindow(QMainWindow):
         # 放到后台：目录在慢速网络盘上时，git 可能要好几秒才返回，不能卡住界面
         self.statusBar().showMessage(f"正在检查：{d} …")
         self.runner.submit(lambda: gitcore.toplevel(d),
-                           self._add_project_path,
+                           self.add_project_path,
                            lambda e: self._add_project_failed(d, e))
 
     def _add_project_failed(self, d: str, err) -> None:
         self.statusBar().clearMessage()
         QMessageBox.warning(self, "不是 Git 仓库", f"{d}\n\n{err}")
 
-    def _add_project_path(self, top: str) -> None:
+    def add_project_path(self, top: str) -> None:
+        """添加一个项目（top：仓库根目录）；已经在列表里就切过去。"""
         self.statusBar().clearMessage()
         for i, p in enumerate(self.projects):
             if os.path.normcase(p.path) == os.path.normcase(top):
@@ -522,12 +541,14 @@ class MainWindow(QMainWindow):
         for e in self.projects[:MAX_TABS]:
             if e.path == cur and e.path in self.views:
                 continue                # 当前项目由它自己的页面刷新
-            path = e.path
-            gen = self._badge_gen[path] = self._badge_gen.get(path, 0) + 1
-            # 标签上只需要知道“有没有改动”，未跟踪目录不必逐个文件展开
-            self.runner.submit(lambda p=path: gitcore.get_status(p, untracked="normal"),
-                               lambda st, p=path, g=gen: self._on_badge(p, g, badge_from_status(st)),
-                               lambda err, p=path, g=gen: self._on_badge(p, g, Badge(error=True)))
+            self._read_badge(e.path)
+
+    def _read_badge(self, path: str) -> None:
+        gen = self._badge_gen[path] = self._badge_gen.get(path, 0) + 1
+        # 标签上只需要知道“有没有改动”，未跟踪目录不必逐个文件展开
+        self.runner.submit(lambda: gitcore.get_status(path, untracked="normal"),
+                           lambda st: self._on_badge(path, gen, badge_from_status(st)),
+                           lambda _err: self._on_badge(path, gen, Badge(error=True)))
 
     def _on_badge(self, path, gen, badge):
         if self._badge_gen.get(path) != gen:
@@ -596,7 +617,8 @@ class MainWindow(QMainWindow):
             self, "关于 ggit",
             f"<b>ggit {__version__}</b><br>多项目 Git 只读查看工具。<br><br>"
             "显示 / 隐藏（全局）：Alt+G<br>切换 git / 文件工作模式：Alt+F<br>"
-            "切换项目：Ctrl+1…0 / Ctrl+Tab / Ctrl+P<br>刷新：F5<br>分支列表：Ctrl+B（或点左上角的分支名）<br>文件历史：Ctrl+F<br>"
+            "切换项目：Ctrl+1…0 / Ctrl+Tab / Ctrl+P<br>刷新：F5<br>"
+            "分支列表：Ctrl+B（或点左上角的分支名）<br>文件历史：Ctrl+F<br>"
             "切换 diff 模式：Alt+D<br>上一处 / 下一处改动：F3 / F4<br>"
             "关闭文档：Ctrl+W")
 
@@ -619,12 +641,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"全局字体大小已恢复为默认 ({FONT_DEFAULT} pt)", 2500)
 
     def _apply_font_size(self, size: int) -> None:
-        # 1. 改全局字体：没有单独设置过字体的控件会自动跟着变
+        # 1. 改全局字体（没有单独设置过字体的控件会自动跟着变），并按新字号重新生成样式表
         app = QApplication.instance()
-        if app is not None:
-            f = app.font()
-            f.setPointSize(size)
-            app.setFont(f)
+        if isinstance(app, QApplication):
+            theme.apply_font_size(app, size)
 
         # 2. 单独设置过字体的控件（比如加粗的区块标题）：只改字号，保留粗体等其它属性。
         #    代码视图（及其内部控件）用等宽字体，由下面的 apply_font_size 单独处理。
@@ -645,7 +665,7 @@ class MainWindow(QMainWindow):
         err = config.save({
             "projects": [{"path": p.path, "name": p.name} for p in self.projects],
             "current": cur,
-            "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
+            "geometry": bytes(self.saveGeometry().toBase64().data()).decode("ascii"),
             "options": {"ignore_ws": self.options.ignore_ws,
                         "ignore_eol": self.options.ignore_eol,
                         "encoding": self.options.encoding,

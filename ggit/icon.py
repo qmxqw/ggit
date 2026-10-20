@@ -14,7 +14,7 @@ def app_icon() -> QIcon:
         icon = QIcon()
         for _size, b64 in sorted(ICON_PNGS.items()):
             pm = QPixmap()
-            if pm.loadFromData(base64.b64decode(b64), "PNG"):
+            if pm.loadFromData(base64.b64decode(b64)):     # 格式从文件头自动识别（PNG）
                 icon.addPixmap(pm)
         _icon = icon
     return _icon

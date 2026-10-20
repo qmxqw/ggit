@@ -5,8 +5,9 @@ AsyncRunner 在执行任务的线程里登记一个 CancellationToken；gitcore.
 """
 from __future__ import annotations
 
+import contextlib
+import subprocess
 import threading
-from typing import Optional
 
 
 class GitCancelledError(Exception):
@@ -14,36 +15,32 @@ class GitCancelledError(Exception):
 
 
 class CancellationToken:
-    def __init__(self):
+    def __init__(self) -> None:
         self.cancelled = False
-        self.proc = None
+        self.proc: subprocess.Popen[bytes] | None = None
         self._lock = threading.Lock()
 
-    def set_proc(self, proc):
+    def set_proc(self, proc: subprocess.Popen[bytes] | None) -> None:
         with self._lock:
             self.proc = proc
             if self.cancelled and proc and proc.poll() is None:
-                try:
+                with contextlib.suppress(OSError):          # 进程刚好自己结束了
                     proc.kill()
-                except OSError:
-                    pass
 
-    def cancel(self):
+    def cancel(self) -> None:
         with self._lock:
             self.cancelled = True
             if self.proc and self.proc.poll() is None:
-                try:
+                with contextlib.suppress(OSError):
                     self.proc.kill()
-                except OSError:
-                    pass
 
 
 _thread_local = threading.local()
 
 
-def get_current_cancel_token() -> Optional[CancellationToken]:
+def get_current_cancel_token() -> CancellationToken | None:
     return getattr(_thread_local, "token", None)
 
 
-def set_current_cancel_token(token: Optional[CancellationToken]) -> None:
+def set_current_cancel_token(token: CancellationToken | None) -> None:
     _thread_local.token = token

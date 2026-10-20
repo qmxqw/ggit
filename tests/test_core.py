@@ -1,52 +1,34 @@
-"""gitcore / graph 的测试：用真实的临时 Git 仓库验证。
+"""gitcore / graph / config 的测试：用真实的临时 Git 仓库验证。
 
-运行：  python -m unittest discover -s tests -v
+运行：  python -m pytest   或   python -m unittest discover -s tests -v
 """
-import os
-import shutil
+import itertools
 import subprocess
 import sys
-import tempfile
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import support
+from support import TempDir, commit, git, init_repo, write
 
-from ggit import gitcore  # noqa: E402
-from ggit.graph import GraphLayout  # noqa: E402
-
-ENV = dict(os.environ,
-           GIT_AUTHOR_NAME="tester", GIT_AUTHOR_EMAIL="t@example.com",
-           GIT_COMMITTER_NAME="tester", GIT_COMMITTER_EMAIL="t@example.com",
-           GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
-
-
-def git(repo, *args):
-    subprocess.run(["git", *args], cwd=repo, env=ENV, check=True,
-                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-
-def write(repo, name, data):
-    mode = "wb" if isinstance(data, bytes) else "w"
-    with open(os.path.join(repo, name), mode) as f:
-        f.write(data)
-
-
-def commit(repo, msg):
-    git(repo, "add", "-A")
-    git(repo, "commit", "-q", "-m", msg)
+from ggit import config, gitcore
+from ggit.graph import GraphLayout, lane_metrics
 
 
 class CoreTest(unittest.TestCase):
+    """一个带分支、合并、重命名、标签和工作区改动的仓库。"""
+    tmp: TempDir
+    repo: str
+    root: str
+    merge: str
+    rename: str
+
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp()
-        r = cls.repo = os.path.join(cls.tmp, "r")
-        os.makedirs(r)
-        git(r, "init", "-q", "-b", "main")
+        cls.tmp = TempDir()
+        r = cls.repo = init_repo(cls.tmp.sub("r"))
         write(r, "a.txt", "l1\nl2\nl3\n")
         write(r, "gbk.txt", "你好，世界\n第二行\n".encode("gbk"))
-        commit(r, "init 初始提交")
-        cls.root = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=r, env=ENV).decode().strip()
+        cls.root = commit(r, "init 初始提交")
         git(r, "checkout", "-q", "-b", "feature")
         write(r, "a.txt", "l1\nl2 changed\nl3\n")
         commit(r, "feature change")
@@ -54,11 +36,10 @@ class CoreTest(unittest.TestCase):
         write(r, "c.txt", "c\n")
         commit(r, "main work")
         git(r, "merge", "-q", "--no-ff", "feature", "-m", "merge feature")
-        cls.merge = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=r, env=ENV).decode().strip()
+        cls.merge = git(r, "rev-parse", "HEAD")
         git(r, "mv", "a.txt", "b.txt")
         write(r, "b.txt", "l1\nl2 changed\nl3\nl4\n")
-        commit(r, "rename a to b")
-        cls.rename = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=r, env=ENV).decode().strip()
+        cls.rename = commit(r, "rename a to b")
         git(r, "tag", "v1")
         # 工作区改动
         write(r, "b.txt", "l1\nl2 changed\nl3\nl4\nwip\n")
@@ -67,7 +48,7 @@ class CoreTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
+        cls.tmp.cleanup()
 
     # ---- status ----
     def test_status(self):
@@ -79,6 +60,7 @@ class CoreTest(unittest.TestCase):
         kinds = {c.path: c.kind for c in st.changes}
         self.assertEqual(kinds, {"b.txt": "M", "gbk.txt": "M", "new.txt": "U"})
         self.assertTrue(st.dirty)
+        self.assertEqual(st.total_changes, 3)
 
     def test_fingerprint_stable(self):
         a = gitcore.get_snapshot(self.repo).fingerprint
@@ -87,9 +69,9 @@ class CoreTest(unittest.TestCase):
 
     def test_not_a_repo(self):
         with self.assertRaises(gitcore.GitError):
-            gitcore.toplevel(self.tmp)
+            gitcore.toplevel(self.tmp.path)
         with self.assertRaises(gitcore.GitError):
-            gitcore.get_snapshot(os.path.join(self.tmp, "nope"))
+            gitcore.get_snapshot(self.tmp.sub("nope"))
 
     # ---- log ----
     def test_log_and_refs(self):
@@ -123,7 +105,7 @@ class CoreTest(unittest.TestCase):
         commits = gitcore.get_log(self.repo, snap, gitcore.SCOPE_ALL)
         lay = GraphLayout()
         rows = [lay.add(c.oid, c.parents) for c in commits]
-        for prev, nxt in zip(rows, rows[1:]):   # 上一行的下半格终点列 == 下一行的上半格起点列
+        for prev, nxt in itertools.pairwise(rows):   # 上一行的下半格终点列 == 下一行的上半格起点列
             self.assertEqual({b for _, b, _ in prev.bottom}, {a for a, _, _ in nxt.top})
         self.assertEqual(rows[-1].bottom, [])    # 根提交之后没有线了
         merge_row = rows[[c.oid for c in commits].index(self.merge)]
@@ -150,31 +132,28 @@ class CoreTest(unittest.TestCase):
 
     def test_commit_diff_root_gbk(self):
         fd = gitcore.get_commit_diff(self.repo, self.root, ["gbk.txt"])
-        texts = [l.text for l in fd.lines if l.kind == "add"]
+        texts = [ln.text for ln in fd.lines if ln.kind == "add"]
         self.assertEqual(texts, ["你好，世界", "第二行"])
         self.assertEqual((fd.added, fd.deleted), (2, 0))
         bad = gitcore.get_commit_diff(self.repo, self.root, ["gbk.txt"], encoding=gitcore.ENC_UTF8)
-        self.assertNotEqual([l.text for l in bad.lines if l.kind == "add"], texts)
+        self.assertNotEqual([ln.text for ln in bad.lines if ln.kind == "add"], texts)
 
     def test_commit_diff_rename_and_merge(self):
         fd = gitcore.get_commit_diff(self.repo, self.rename, ["a.txt", "b.txt"])
         self.assertEqual((fd.added, fd.deleted), (1, 0))
         fd = gitcore.get_commit_diff(self.repo, self.merge, ["a.txt"])
         self.assertEqual((fd.added, fd.deleted), (1, 1))
-        dels = [(l.old_no, l.text) for l in fd.lines if l.kind == "del"]
-        adds = [(l.new_no, l.text) for l in fd.lines if l.kind == "add"]
+        dels = [(ln.old_no, ln.text) for ln in fd.lines if ln.kind == "del"]
+        adds = [(ln.new_no, ln.text) for ln in fd.lines if ln.kind == "add"]
         self.assertEqual(dels, [(2, "l2")])
         self.assertEqual(adds, [(2, "l2 changed")])
 
     def test_ignore_whitespace(self):
-        r = os.path.join(self.tmp, "ws")
-        os.makedirs(r)
-        git(r, "init", "-q", "-b", "main")
+        r = init_repo(self.tmp.sub("ws"))
         write(r, "f.txt", "a b\nc\n")
         commit(r, "one")
         write(r, "f.txt", "a  b\r\nc\r\n")
-        commit(r, "two")
-        oid = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=r, env=ENV).decode().strip()
+        oid = commit(r, "two")
         self.assertGreater(gitcore.get_commit_diff(r, oid, ["f.txt"]).added, 0)
         self.assertEqual(gitcore.get_commit_diff(r, oid, ["f.txt"], ignore_ws=True).added, 0)
 
@@ -183,12 +162,12 @@ class CoreTest(unittest.TestCase):
         snap = gitcore.get_snapshot(self.repo)
         by = {c.path: c for c in snap.status.changes}
         fd = gitcore.get_worktree_diff(self.repo, by["b.txt"], True)
-        self.assertEqual([(l.new_no, l.text) for l in fd.lines if l.kind == "add"], [(5, "wip")])
+        self.assertEqual([(ln.new_no, ln.text) for ln in fd.lines if ln.kind == "add"], [(5, "wip")])
         fd = gitcore.get_worktree_diff(self.repo, by["gbk.txt"], True)
-        self.assertEqual([l.text for l in fd.lines if l.kind == "del"], ["第二行"])
-        self.assertEqual([l.text for l in fd.lines if l.kind == "add"], ["改动后的第二行"])
+        self.assertEqual([ln.text for ln in fd.lines if ln.kind == "del"], ["第二行"])
+        self.assertEqual([ln.text for ln in fd.lines if ln.kind == "add"], ["改动后的第二行"])
         fd = gitcore.get_worktree_diff(self.repo, by["new.txt"], True)
-        self.assertEqual([l.text for l in fd.lines if l.kind == "add"], ["新文件", "第二行"])
+        self.assertEqual([ln.text for ln in fd.lines if ln.kind == "add"], ["新文件", "第二行"])
 
     # ---- 文件历史 ----
     def test_file_history_follows_rename(self):
@@ -202,9 +181,7 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(fd.added, 1)
 
     def test_file_history_of_deleted_file(self):
-        r = os.path.join(self.tmp, "del")
-        os.makedirs(r)
-        git(r, "init", "-q", "-b", "main")
+        r = init_repo(self.tmp.sub("del"))
         write(r, "x.txt", "x\n")
         commit(r, "add x")
         git(r, "rm", "-q", "x.txt")
@@ -213,23 +190,19 @@ class CoreTest(unittest.TestCase):
         self.assertEqual([h.status for h in hist], ["D", "A"])
 
     def test_list_files(self):
-        self.assertEqual(sorted(gitcore.list_files(self.repo)), ["b.txt", "c.txt", "gbk.txt"])
-
+        self.assertEqual(gitcore.list_files(self.repo), ["b.txt", "c.txt", "gbk.txt"])
 
     # ---- 分支列表 ----
     def test_branch_list_local_and_remote(self):
-        a = os.path.join(self.tmp, "br_a")
-        os.makedirs(a)
-        git(a, "init", "-q", "-b", "main")
+        a = init_repo(self.tmp.sub("br_a"))
         write(a, "f.txt", "1\n")
         commit(a, "c1")
         git(a, "checkout", "-q", "-b", "feature")
         write(a, "f.txt", "2\n")
         commit(a, "feature work")
         git(a, "checkout", "-q", "main")
-        bare = os.path.join(self.tmp, "br_bare.git")
-        subprocess.run(["git", "clone", "-q", "--bare", a, bare], env=ENV, check=True,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        bare = self.tmp.sub("br_bare.git")
+        git(self.tmp.path, "clone", "-q", "--bare", a, bare)
         git(a, "remote", "add", "origin", bare)
         git(a, "fetch", "-q", "origin")
         git(a, "remote", "set-head", "origin", "main")        # 产生 origin/HEAD：列表里不该出现
@@ -252,9 +225,7 @@ class CoreTest(unittest.TestCase):
         self.assertEqual({c.subject for c in allc}, {"c1", "feature work", "main ahead"})
 
     def test_branch_list_gone_upstream(self):
-        r = os.path.join(self.tmp, "br_gone")
-        os.makedirs(r)
-        git(r, "init", "-q", "-b", "main")
+        r = init_repo(self.tmp.sub("br_gone"))
         write(r, "f.txt", "1\n")
         commit(r, "c1")
         self.assertEqual([(b.name, b.upstream, b.is_current) for b in gitcore.get_branches(r)],
@@ -262,9 +233,7 @@ class CoreTest(unittest.TestCase):
 
     # ---- 空仓库 ----
     def test_empty_repo(self):
-        r = os.path.join(self.tmp, "empty")
-        os.makedirs(r)
-        git(r, "init", "-q", "-b", "main")
+        r = init_repo(self.tmp.sub("empty"))
         write(r, "n.txt", "hi\n")
         snap = gitcore.get_snapshot(r)
         self.assertEqual(snap.status.head_oid, "")
@@ -273,12 +242,82 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(fd.added, 1)
 
 
+class SmallRepoTest(unittest.TestCase):
+    """每个测试自己建一个小仓库。"""
+
+    def setUp(self):
+        self.tmp = TempDir()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = init_repo(self.tmp.sub("r"))
+
+    def test_untracked_file_truncation(self):
+        write(self.repo, "big.txt", "x\n" * 50)
+        old = gitcore.MAX_DIFF_PARSE_LINES
+        gitcore.MAX_DIFF_PARSE_LINES = 10
+        try:
+            fd = gitcore.get_worktree_diff(self.repo, gitcore.FileChange("big.txt", None, "?", "?", "U"), False)
+        finally:
+            gitcore.MAX_DIFF_PARSE_LINES = old
+        self.assertTrue(fd.truncated)
+        self.assertEqual(fd.added, 10)
+        self.assertEqual((fd.lines[-1].kind, fd.lines[-1].text), ("note", gitcore.TRUNCATED_NOTE))
+
+    def test_status_total_changes(self):
+        for i in range(5):
+            write(self.repo, f"f{i}.txt", "x\n")
+        old = gitcore.MAX_CHANGES
+        gitcore.MAX_CHANGES = 3
+        try:
+            st = gitcore.get_status(self.repo)
+        finally:
+            gitcore.MAX_CHANGES = old
+        self.assertEqual((len(st.changes), st.total_changes), (3, 5))
+
+    def test_status_untracked_modes(self):
+        write(self.repo, "sub/x.txt", "1\n")
+        write(self.repo, "sub/y.txt", "2\n")
+        self.assertEqual(len(gitcore.get_status(self.repo).changes), 2)
+        self.assertEqual([c.path for c in gitcore.get_status(self.repo, untracked="normal").changes], ["sub/"])
+
+    def test_list_files_with_untracked(self):
+        write(self.repo, ".gitignore", "build/\n")
+        write(self.repo, "a.txt", "1\n")
+        commit(self.repo, "c1")
+        write(self.repo, "new.txt", "2\n")
+        write(self.repo, "build/out.bin", "3\n")
+        self.assertEqual(gitcore.list_files(self.repo), [".gitignore", "a.txt"])
+        self.assertEqual(gitcore.list_files(self.repo, untracked=True), [".gitignore", "a.txt", "new.txt"])
+
+
+class ConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TempDir()
+        self.addCleanup(self.tmp.cleanup)
+        orig = config.config_path
+        self.addCleanup(lambda: setattr(config, "config_path", orig))
+
+    def test_save_reports_error(self):
+        write(self.tmp.path, "blocker", "x")         # 父目录的位置被一个文件占了：一定写不进去
+        config.config_path = lambda: self.tmp.sub("blocker", "config.json")
+        self.assertNotEqual(config.save({"a": 1}), "")
+
+    def test_save_and_load(self):
+        config.config_path = lambda: self.tmp.sub("ok", "config.json")
+        self.assertEqual(config.save({"a": 1}), "")
+        self.assertEqual(config.load(), {"a": 1})
+
+    def test_load_bad_file(self):
+        config.config_path = lambda: self.tmp.sub("bad.json")
+        write(self.tmp.path, "bad.json", "{ not json")
+        self.assertEqual(config.load(), {})
+
+
 class ParseTest(unittest.TestCase):
     def test_parse_diff_crlf_and_markers(self):
         data = (b"diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n"
                 b"@@ -1,2 +1,2 @@ sec\n a\r\n-b\r\n+c\r\n\\ No newline at end of file\n")
         fd = gitcore.parse_diff(data)
-        self.assertEqual([(l.kind, l.old_no, l.new_no, l.text) for l in fd.lines],
+        self.assertEqual([(ln.kind, ln.old_no, ln.new_no, ln.text) for ln in fd.lines],
                          [("hunk", None, None, "@@ -1,2 +1,2 @@ sec"),
                           ("ctx", 1, 1, "a"), ("del", 2, None, "b"), ("add", None, 2, "c")])
 
@@ -286,117 +325,39 @@ class ParseTest(unittest.TestCase):
         # 被删除的行内容是 "-- x"，被新增的行内容是 "++ y"，不能被当成文件头
         data = b"@@ -1 +1 @@\n--- x\n+++ y\n"
         fd = gitcore.parse_diff(data)
-        self.assertEqual([(l.kind, l.text) for l in fd.lines[1:]], [("del", "-- x"), ("add", "++ y")])
+        self.assertEqual([(ln.kind, ln.text) for ln in fd.lines[1:]], [("del", "-- x"), ("add", "++ y")])
 
     def test_mixed_encoding_lines(self):
-        data = "@@ -1 +1 @@\n-".encode() + "旧的".encode("gbk") + b"\n+" + "新的".encode() + b"\n"
+        data = b"@@ -1 +1 @@\n-" + "旧的".encode("gbk") + b"\n+" + "新的".encode() + b"\n"
         fd = gitcore.parse_diff(data)
-        self.assertEqual([l.text for l in fd.lines[1:]], ["旧的", "新的"])
+        self.assertEqual([ln.text for ln in fd.lines[1:]], ["旧的", "新的"])
 
     def test_binary(self):
         fd = gitcore.parse_diff(b"diff --git a/x b/x\nBinary files a/x and b/x differ\n")
         self.assertTrue(fd.is_binary)
 
     def test_diff_truncation_protection(self):
-        # 超过行数截断保护
         huge_data = b"@@ -1,1 +1,40000 @@\n" + b"+line\n" * 35000
         fd = gitcore.parse_diff(huge_data)
-        self.assertTrue(any("已自动截断" in (l.text or "") for l in fd.lines))
         self.assertLessEqual(len(fd.lines), gitcore.MAX_DIFF_PARSE_LINES + 2)
         self.assertTrue(fd.truncated)
         self.assertEqual((fd.lines[-1].kind, fd.lines[-1].text), ("note", gitcore.TRUNCATED_NOTE))
 
-    def test_untracked_file_truncation(self):
-        d = tempfile.mkdtemp()
-        try:
-            write(d, "big.txt", "x\n" * 50)
-            old = gitcore.MAX_DIFF_PARSE_LINES
-            gitcore.MAX_DIFF_PARSE_LINES = 10
-            try:
-                fd = gitcore._untracked_diff(d, "big.txt", gitcore.ENC_AUTO)
-            finally:
-                gitcore.MAX_DIFF_PARSE_LINES = old
-            self.assertTrue(fd.truncated)
-            self.assertEqual(fd.added, 10)
-            self.assertEqual(fd.lines[-1].kind, "note")
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
     def test_unquote_path(self):
-        u = gitcore._unquote_path
+        u = gitcore.unquote_path
         self.assertEqual(u(b"plain.txt"), b"plain.txt")
         self.assertEqual(u(b'"a\\tb\\"c\\\\d"'), b'a\tb"c\\d')
-        self.assertEqual(u('"\\346\\226\\207.txt"'.encode()), "文.txt".encode())
+        self.assertEqual(u(b'"\\346\\226\\207.txt"'), "文.txt".encode())
         self.assertEqual(u(b'"'), b'"')
 
-    def test_gitcore_does_not_need_qt(self):
-        root = os.path.join(os.path.dirname(__file__), "..")
-        out = subprocess.check_output(
-            [sys.executable, "-c",
-             "import sys, ggit.gitcore, ggit.graph, ggit.difftools, ggit.fileutil, ggit.items;"
-             "print(any(m.startswith('PySide6') for m in sys.modules))"], cwd=root)
+    def test_core_modules_do_not_need_qt(self):
+        code = ("import sys, ggit.gitcore, ggit.cancel, ggit.graph, ggit.difftools, ggit.fileutil, "
+                "ggit.items, ggit.config, ggit.options, ggit.utils;"
+                "print(any(m.startswith('PySide6') for m in sys.modules))")
+        out = subprocess.check_output([sys.executable, "-c", code], cwd=support.ROOT)
         self.assertEqual(out.decode().strip(), "False")
 
-    def test_status_total_changes(self):
-        d = tempfile.mkdtemp()
-        try:
-            git(d, "init", "-q", "-b", "main")
-            for i in range(5):
-                write(d, f"f{i}.txt", "x\n")
-            old = gitcore.MAX_CHANGES
-            gitcore.MAX_CHANGES = 3
-            try:
-                st = gitcore.get_status(d)
-            finally:
-                gitcore.MAX_CHANGES = old
-            self.assertEqual((len(st.changes), st.total_changes), (3, 5))
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
-    def test_list_files_with_untracked(self):
-        d = tempfile.mkdtemp()
-        try:
-            git(d, "init", "-q", "-b", "main")
-            write(d, ".gitignore", "build/\n")
-            write(d, "a.txt", "1\n")
-            commit(d, "c1")
-            write(d, "new.txt", "2\n")
-            os.makedirs(os.path.join(d, "build"))
-            write(d, "build/out.bin", "3\n")
-            self.assertEqual(gitcore.list_files(d), [".gitignore", "a.txt"])
-            self.assertEqual(gitcore.list_files(d, untracked=True), [".gitignore", "a.txt", "new.txt"])
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
-    def test_config_save_reports_error(self):
-        from ggit import config
-        d = tempfile.mkdtemp()
-        orig = config.config_path
-        try:
-            write(d, "blocker", "x")                 # 父目录位置被一个文件占了：一定写不进去
-            config.config_path = lambda: os.path.join(d, "blocker", "config.json")
-            self.assertNotEqual(config.save({"a": 1}), "")
-            config.config_path = lambda: os.path.join(d, "ok", "config.json")
-            self.assertEqual(config.save({"a": 1}), "")
-            self.assertEqual(config.load(), {"a": 1})
-        finally:
-            config.config_path = orig
-            shutil.rmtree(d, ignore_errors=True)
-
-    def test_status_untracked_modes(self):
-        d = tempfile.mkdtemp()
-        try:
-            git(d, "init", "-q", "-b", "main")
-            os.makedirs(os.path.join(d, "sub"))
-            write(d, "sub/x.txt", "1\n")
-            write(d, "sub/y.txt", "2\n")
-            self.assertEqual(len(gitcore.get_status(d).changes), 2)
-            self.assertEqual([c.path for c in gitcore.get_status(d, untracked="normal").changes], ["sub/"])
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
     def test_lane_metrics(self):
-        from ggit.graph import lane_metrics
         self.assertEqual(lane_metrics(3, 14, 140, 5), (14, 3))        # 线少：正常列宽
         self.assertEqual(lane_metrics(10, 14, 140, 5), (14, 10))
         self.assertEqual(lane_metrics(20, 14, 140, 5), (7, 20))       # 线多：压窄，每条仍有一列

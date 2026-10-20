@@ -10,34 +10,32 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QRect, QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QPainter, QTextBlockFormat,
-                           QTextCharFormat, QTextCursor)
-from PySide6.QtWidgets import (QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit,
-                               QScrollBar, QSizePolicy, QStackedWidget, QToolButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import QPointF, QRect, Qt, QTimer
+from PySide6.QtGui import QBrush, QFont, QFontDatabase, QPainter, QTextBlockFormat, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPlainTextEdit,
+    QScrollBar,
+    QSizePolicy,
+    QStackedWidget,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from . import theme
 from .difftools import build_split, change_groups, trim_context
 from .options import FONT_DEFAULT
+from .ui_common import colored
+from .ui_docs import DocView
 
 MAX_ROWS = 30000            # 超过就截断，避免一次塞太多行卡住界面
 MODE_UNIFIED = "unified"
 MODE_SPLIT = "split"
-
-FILL_BG = QColor("#262628")          # 对照模式里补出来的空行
-DEL_MARK = QColor(241, 76, 76, 220)
-ADD_MARK = QColor(78, 201, 123, 220)
-
-_SB_CSS = """
-QScrollBar:vertical { background: transparent; width: 18px; margin: 0px; border: none; }
-QScrollBar::handle:vertical { background: rgba(190,190,190,70); min-height: 28px;
-                              border: 1px solid rgba(255,255,255,90); margin: 0px; }
-QScrollBar::handle:vertical:hover { background: rgba(210,210,210,110); }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; border: none; background: none; }
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
-"""
-
 
 def code_font(ui_pt: int) -> QFont:
     """代码视图用的等宽字体：比界面字体大 1 号，最小 8 pt。"""
@@ -68,7 +66,7 @@ class MarkerScrollBar(QScrollBar):
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Vertical, parent)
         self.setFixedWidth(18)
-        self.setStyleSheet(_SB_CSS)
+        self.setStyleSheet(theme.MARKER_SCROLLBAR_CSS)
         self._markers: list = []       # [(起始行, 结束行, 含删除, 含新增)]
 
     def set_markers(self, groups: list) -> None:
@@ -81,17 +79,17 @@ class MarkerScrollBar(QScrollBar):
     def paintEvent(self, event):
         p = QPainter(self)
         w, h, total = self.width(), self.height(), self._total()
-        p.fillRect(0, 0, w, h, QColor("#1b1b1c"))
+        p.fillRect(0, 0, w, h, theme.MARKER_BAR_BG)
         for s, e, has_del, has_add in self._markers:
             y0 = int(s / total * h)
             hh = max(4, int((e + 1) / total * h) - y0)
             x0, x1 = 3, w - 3
             if has_del and has_add:
                 mid = (x0 + x1) // 2
-                p.fillRect(x0, y0, mid - x0, hh, DEL_MARK)
-                p.fillRect(mid, y0, x1 - mid, hh, ADD_MARK)
+                p.fillRect(x0, y0, mid - x0, hh, theme.DEL_MARK)
+                p.fillRect(mid, y0, x1 - mid, hh, theme.ADD_MARK)
             else:
-                p.fillRect(x0, y0, x1 - x0, hh, DEL_MARK if has_del else ADD_MARK)
+                p.fillRect(x0, y0, x1 - x0, hh, theme.DEL_MARK if has_del else theme.ADD_MARK)
         p.end()
         super().paintEvent(event)      # 滑块（半透明）画在色块上面
 
@@ -118,10 +116,10 @@ class MarkerScrollBar(QScrollBar):
 class ChangeNavigator:
     """“下一处 / 上一处改动”：在每段改动的起始行之间跳转（到头后回绕）。"""
 
-    def __init__(self, bar: QScrollBar):
+    def __init__(self, bar: QScrollBar) -> None:
         self.bar = bar
-        self.starts: list = []
-        self.cur = None
+        self.starts: list[int] = []
+        self.cur: int | None = None
         self._busy = False
         bar.valueChanged.connect(self._on_scroll)
 
@@ -157,26 +155,25 @@ class _Gutter(QWidget):
         self._view.paint_gutter(event)
 
 
-class _CodeView(QPlainTextEdit):
+class CodeView(QPlainTextEdit):
     """只读代码视图：整行底色 + 左侧行号栏（1 列或 2 列）。"""
 
-    def __init__(self, cols: int, own_bar: bool, parent=None):
+    def __init__(self, cols: int, marker_bar: MarkerScrollBar | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._cols = cols
         self._nums: list = []
         self._chg: list = []
         self._digits = 3
-        if own_bar:
-            self.setVerticalScrollBar(MarkerScrollBar())
+        if marker_bar is not None:                 # 用加宽、带改动色块的滚动条
+            self.setVerticalScrollBar(marker_bar)
         self.setReadOnly(True)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self._gutter = _Gutter(self)
         self.blockCountChanged.connect(self._update_margin)
         self.updateRequest.connect(self._on_update_request)
-        app = QApplication.instance()
-        ui_pt = app.font().pointSize() if app and app.font().pointSize() > 0 else FONT_DEFAULT
-        self.apply_ui_size(ui_pt)
+        ui_pt = QApplication.font().pointSize()
+        self.apply_ui_size(ui_pt if ui_pt > 0 else FONT_DEFAULT)
 
     def apply_ui_size(self, ui_pt: int) -> None:
         """界面字号变了：代码字体（等宽，比界面字体大 1 号）跟着变。"""
@@ -264,12 +261,12 @@ class _CodeView(QPlainTextEdit):
         p.end()
 
 
-class UnifiedView(_CodeView):
+class UnifiedView(CodeView):
     """上下合并模式。"""
 
     def __init__(self, parent=None):
-        super().__init__(2, True, parent)
-        self.bar: MarkerScrollBar = self.verticalScrollBar()
+        self.bar = MarkerScrollBar()
+        super().__init__(2, self.bar, parent)
         self.nav = ChangeNavigator(self.bar)
 
     def set_lines(self, lines: list) -> None:
@@ -307,8 +304,8 @@ class SplitView(QWidget):
         grid = QGridLayout(self)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(0)
-        self.left = _CodeView(1, False)
-        self.right = _CodeView(1, False)
+        self.left = CodeView(1)
+        self.right = CodeView(1)
         for v in (self.left, self.right):
             v.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.left.setObjectName("splitLeft")
@@ -364,13 +361,13 @@ class SplitView(QWidget):
                 flags.append((False, False))
                 continue
             if a is None:
-                lb.append(Blk("", FILL_BG, None, ("",), False))
+                lb.append(Blk("", theme.FILL_BG, None, ("",), False))
             elif a.kind == "del":
                 lb.append(Blk(a.text, theme.DEL_BG, None, (_n(a.old_no),), True))
             else:
                 lb.append(Blk(a.text, None, None, (_n(a.old_no),), False))
             if b is None:
-                rb.append(Blk("", FILL_BG, None, ("",), False))
+                rb.append(Blk("", theme.FILL_BG, None, ("",), False))
             elif b.kind == "add":
                 rb.append(Blk(b.text, theme.ADD_BG, None, (_n(b.new_no),), True))
             else:
@@ -391,8 +388,7 @@ class SplitView(QWidget):
 
 
 # ---------------------------------------------------------------- 一个“文档”（一个标签页里显示的内容）
-class DiffDocument(QWidget):
-    modeToggleRequested = Signal()
+class DiffDocument(DocView):
 
     def __init__(self, mode: str = MODE_UNIFIED, parent=None):
         super().__init__(parent)
@@ -421,10 +417,9 @@ class DiffDocument(QWidget):
         self.next_btn = QToolButton()
         self.next_btn.setText("↓")
         self.next_btn.setToolTip("下一处改动 (F4)")
-        for w in (self.title,):
-            bl.addWidget(w, 1)
-        for w in (self.stats, self.mode_btn, self.prev_btn, self.next_btn):
-            bl.addWidget(w)
+        bl.addWidget(self.title, 1)
+        for btn in (self.stats, self.mode_btn, self.prev_btn, self.next_btn):
+            bl.addWidget(btn)
         lay.addWidget(bar)
 
         self.stack = QStackedWidget()
@@ -463,10 +458,10 @@ class DiffDocument(QWidget):
         if not fd.added and not fd.deleted:
             return self.set_message("没有可显示的差异。\n（内容相同，或差异只是被忽略的空白 / 换行符。）")
         self.fd = fd
-        self.stats.setText(f"<span style='color:#73c991'>+{fd.added}</span>&nbsp;&nbsp;"
-                           f"<span style='color:#f14c4c'>−{fd.deleted}</span>"
-                           + ("&nbsp;&nbsp;<span style='color:#e2c08d'>（已截断）</span>"
-                              if fd.truncated else ""))
+        stats = [colored(f"+{fd.added}", theme.ADDED), colored(f"−{fd.deleted}", theme.DELETED)]
+        if fd.truncated:
+            stats.append(colored("（已截断）", theme.MODIFIED))
+        self.stats.setText("&nbsp;&nbsp;".join(stats))
         self._render(keep_scroll)
 
     def show_result(self, fd, keep_scroll: bool = False) -> None:
@@ -481,7 +476,7 @@ class DiffDocument(QWidget):
     @staticmethod
     def result_signature(fd):
         return (fd.added, fd.deleted, len(fd.lines), fd.is_binary, fd.message,
-                hash(tuple((l.kind, l.text) for l in fd.lines)))
+                hash(tuple((dl.kind, dl.text) for dl in fd.lines)))
 
     def set_mode(self, mode: str) -> None:
         if mode != self.mode:

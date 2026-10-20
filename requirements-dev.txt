@@ -1,0 +1,5 @@
+# 开发用：运行 + 测试 + 代码检查（python tools/check.py）
+-r requirements.txt
+pytest==9.1.1
+ruff==0.17.1
+mypy==2.4.0

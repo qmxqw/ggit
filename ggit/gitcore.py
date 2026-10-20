@@ -16,7 +16,6 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .cancel import GitCancelledError, get_current_cancel_token
 
@@ -46,10 +45,10 @@ class GitError(Exception):
 # --------------------------------------------------------------------------
 # 基础：找到 git、解码、调用
 # --------------------------------------------------------------------------
-_git_exe: Optional[str] = None
+_git_exe: str | None = None
 
 
-def find_git() -> Optional[str]:
+def find_git() -> str | None:
     global _git_exe
     if _git_exe:
         return _git_exe
@@ -114,15 +113,15 @@ def run_git(repo: str, args: list[str], *, check: bool = True, timeout: int = 12
         finally:
             if cancel_token:
                 cancel_token.set_proc(None)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         try:
             proc.kill()
             proc.communicate()
         except OSError:
             pass
-        raise GitError(f"git {args[0]} 超时（超过 {timeout} 秒）")
+        raise GitError(f"git {args[0]} 超时（超过 {timeout} 秒）") from e
     except OSError as e:
-        raise GitError(f"无法运行 git：{e}")
+        raise GitError(f"无法运行 git：{e}") from e
 
     if cancel_token and cancel_token.cancelled:
         raise GitCancelledError("操作已取消")
@@ -139,7 +138,7 @@ def toplevel(path: str) -> str:
     return os.path.normpath(decode_line(out).strip())
 
 
-def _git_dir(repo: str) -> Optional[str]:
+def _git_dir(repo: str) -> str | None:
     dot = os.path.join(repo, ".git")
     if os.path.isdir(dot):
         return dot
@@ -157,7 +156,7 @@ def _git_dir(repo: str) -> Optional[str]:
     return None
 
 
-def _last_fetch_time(repo: str) -> Optional[float]:
+def _last_fetch_time(repo: str) -> float | None:
     gd = _git_dir(repo)
     if not gd:
         return None
@@ -173,7 +172,7 @@ def _last_fetch_time(repo: str) -> Optional[float]:
 @dataclass
 class FileChange:
     path: str
-    orig_path: Optional[str]
+    orig_path: str | None
     x: str       # 暂存区状态字符，'.' 表示无
     y: str       # 工作区状态字符
     kind: str    # M 修改 / A 新增 / D 删除 / R 重命名 / U 未跟踪 / C 冲突
@@ -182,13 +181,13 @@ class FileChange:
 @dataclass
 class RepoStatus:
     head_oid: str = ""                 # 空串：还没有任何提交
-    branch: Optional[str] = None       # None：HEAD 分离
-    upstream: Optional[str] = None
+    branch: str | None = None       # None：HEAD 分离
+    upstream: str | None = None
     ahead: int = 0
     behind: int = 0
     changes: list = field(default_factory=list)
     total_changes: int = 0             # 改动文件的真实总数（changes 最多只保留 MAX_CHANGES 个）
-    last_fetch: Optional[float] = None
+    last_fetch: float | None = None
 
     @property
     def dirty(self) -> bool:
@@ -227,21 +226,21 @@ class Commit:
 class CommitFile:
     status: str          # M A D R C T
     path: str
-    old_path: Optional[str] = None
+    old_path: str | None = None
 
 
 @dataclass
 class DiffLine:
     kind: str            # ctx / add / del / hunk / note（解析时生成的提示行：分段标题、截断说明）
-    old_no: Optional[int]
-    new_no: Optional[int]
+    old_no: int | None
+    new_no: int | None
     text: str
 
 
 @dataclass
 class FileDiff:
     path: str = ""
-    old_path: Optional[str] = None
+    old_path: str | None = None
     is_binary: bool = False
     lines: list = field(default_factory=list)
     added: int = 0
@@ -269,7 +268,7 @@ class BranchInfo:
 class HistoryEntry:
     commit: Commit
     path: str
-    old_path: Optional[str]
+    old_path: str | None
     status: str
 
 
@@ -442,7 +441,7 @@ def parse_decorations(s: str) -> list:
     return refs
 
 
-def _commit_from_fields(f: list) -> Optional[Commit]:
+def _commit_from_fields(f: list) -> Commit | None:
     if len(f) < 6:
         return None
     oid = decode_line(f[0]).strip()
@@ -701,7 +700,7 @@ _C_ESCAPES = {ord("a"): 7, ord("b"): 8, ord("t"): 9, ord("n"): 10, ord("v"): 11,
               ord("f"): 12, ord("r"): 13, ord('"'): 34, ord("\\"): 92}
 
 
-def _unquote_path(raw: bytes) -> bytes:
+def unquote_path(raw: bytes) -> bytes:
     """还原 git 给“特殊”文件名加的 C 风格引号（"a\\tb" / "\\346\\226\\207"）。没加引号的原样返回。"""
     if len(raw) < 2 or not (raw.startswith(b'"') and raw.endswith(b'"')):
         return raw
@@ -723,33 +722,42 @@ def _unquote_path(raw: bytes) -> bytes:
     return bytes(out)
 
 
-def get_file_history(repo: str, path: str, limit: int = 2000) -> list:
+@dataclass
+class _HistRecord:
+    """文件历史里的一条：提交 + 这次提交里这个文件的状态 / 旧路径 / 新路径。"""
+    commit: Commit
+    status: str = ""
+    old: str | None = None
+    new: str | None = None
+
+
+def get_file_history(repo: str, path: str, limit: int = 2000) -> list[HistoryEntry]:
     """某个文件的提交历史（当前分支，追踪重命名；已删除的文件也能查）。"""
     out = run_git(repo, ["log", "--follow", "--decorate=full", "--no-color", "-M",
                          "--name-status", f"--format=%x1e{_FIELDS}",
                          f"--max-count={limit}", "HEAD", "--", path])
-    records = []   # [commit, status, old, new]
-    cur = None
+    records: list[_HistRecord] = []
+    cur: _HistRecord | None = None
     for raw in out.split(b"\n"):
         if raw.startswith(b"\x1e"):
             c = _commit_from_fields(raw[1:].split(b"\x1f"))
-            cur = [c, "", None, None] if c else None
+            cur = _HistRecord(c) if c else None
             if cur:
                 records.append(cur)
         elif cur is not None and raw.strip():
-            parts = [decode_line(_unquote_path(p)) for p in raw.rstrip(b"\r").split(b"\t")]
-            if len(parts) >= 2 and cur[3] is None:
-                cur[1] = parts[0][:1]
+            parts = [decode_line(unquote_path(p)) for p in raw.rstrip(b"\r").split(b"\t")]
+            if len(parts) >= 2 and cur.new is None:
+                cur.status = parts[0][:1]
                 if parts[0][:1] in "RC" and len(parts) >= 3:
-                    cur[2], cur[3] = parts[1], parts[2]
+                    cur.old, cur.new = parts[1], parts[2]
                 else:
-                    cur[3] = parts[1]
+                    cur.new = parts[1]
     entries = []
     cur_path = path
-    for c, status, old, new in records:
-        p = new or cur_path
-        entries.append(HistoryEntry(c, p, old, status or "M"))
-        cur_path = old if old else p
+    for r in records:
+        p = r.new or cur_path
+        entries.append(HistoryEntry(r.commit, p, r.old, r.status or "M"))
+        cur_path = r.old if r.old else p
     return entries
 
 

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from .gitcore import Commit, CommitFile
 from .graph import GraphRow
@@ -30,12 +29,12 @@ class ItemList:
     def __len__(self) -> int:
         return len(self.items)
 
-    def reset(self, rows: list, files_by_oid: Optional[dict] = None) -> None:
+    def reset(self, rows: list, files_by_oid: dict | None = None) -> None:
         self.items = []
         self.lanes = 1
         self.extend(rows, files_by_oid)
 
-    def extend(self, rows: list, files_by_oid: Optional[dict] = None) -> tuple:
+    def extend(self, rows: list, files_by_oid: dict | None = None) -> tuple:
         """追加提交行（files_by_oid 里有的提交直接展开）。返回追加的 (起, 止) 位置；没有追加返回 (0, -1)。"""
         first = len(self.items)
         for r in rows:

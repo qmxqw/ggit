@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import html
+from dataclasses import dataclass
 
-from PySide6.QtCore import (QAbstractListModel, QEvent, QModelIndex, QPoint, QPointF, QRectF,
-                            QSize, Qt, Signal)
+from PySide6.QtCore import QAbstractListModel, QEvent, QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPalette, QPen
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QListView, QStyle,
-                               QStyledItemDelegate, QToolTip)
+from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStyle, QStyledItemDelegate, QToolTip
 
 from . import theme
 from .gitcore import Commit
 from .graph import lane_metrics
 from .items import FileRow, ItemList
-from .utils import STATUS_COLORS, fmt_time
+from .utils import fmt_time
 
 ROW_H = 26
 LANE_W = 14
@@ -151,12 +150,30 @@ class CommitModel(QAbstractListModel):
         return (pos + 1, j - 1) if j > pos + 1 else (0, -1)
 
 
+@dataclass
+class _RowGeom:
+    """一行里绘制要用到的尺寸和颜色。"""
+    rect: QRect
+    top: float
+    mid: float
+    bot: float
+    lane_w: float       # 每列宽度（线多时会被压窄）
+    cols: int           # 能画出的列数
+    text_x: float       # 说明文字从哪里开始
+    text_pen: QColor
+    bg: QColor
+    selected: bool
+
+    def lx(self, col: int) -> float:
+        """第 col 列分支线的 x 坐标（放不下的挤在最后一列）。"""
+        return self.rect.left() + PAD + min(col, self.cols - 1) * self.lane_w + self.lane_w / 2.0
+
+    @property
+    def pen_w(self) -> float:
+        return 2.0 if self.lane_w >= 8 else 1.5
+
+
 class CommitDelegate(QStyledItemDelegate):
-    _lw = float(LANE_W)          # 当前的列宽（线多时会被压窄）
-
-    def _pen_w(self) -> float:
-        return 2.0 if self._lw >= 8 else 1.5
-
     def sizeHint(self, option, index):
         fm = option.fontMetrics
         h = max(24, fm.height() + 8)
@@ -179,52 +196,46 @@ class CommitDelegate(QStyledItemDelegate):
         if selected:
             painter.fillRect(rect, bg)
         elif hovered:
-            painter.fillRect(rect, QColor(255, 255, 255, 20))
+            painter.fillRect(rect, theme.ROW_HOVER)
 
+        lane_w, cols = lane_metrics(model.lanes, LANE_W, GRAPH_MAX_W, MIN_LANE_W)
         top = float(rect.top())
-        mid = top + rect.height() / 2.0
-        bot = float(rect.bottom() + 1)
-
-        lw, cols = lane_metrics(model.lanes, LANE_W, GRAPH_MAX_W, MIN_LANE_W)
-        self._lw = lw
-
-        def lx(c):
-            return rect.left() + PAD + min(c, cols - 1) * lw + lw / 2.0
-
-        text_x = rect.left() + PAD * 2 + cols * lw + 2
-        text_pen = palette.color(QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Text)
-
+        g = _RowGeom(rect=rect, top=top, mid=top + rect.height() / 2.0, bot=float(rect.bottom() + 1),
+                     lane_w=lane_w, cols=cols, text_x=rect.left() + PAD * 2 + cols * lane_w + 2,
+                     text_pen=palette.color(QPalette.ColorRole.HighlightedText if selected
+                                            else QPalette.ColorRole.Text),
+                     bg=bg, selected=selected)
         if isinstance(item, FileRow):
-            self._paint_file(painter, option, item, lx, top, mid, bot, text_x, text_pen, selected)
+            self._paint_file(painter, option, item, g)
         else:
-            self._paint_commit(painter, option, item, model, lx, top, mid, bot, text_x, text_pen, selected, bg)
+            self._paint_commit(painter, option, item, model, g)
         painter.restore()
 
     # ------------------------------------------------------------ 文件行
-    def _paint_file(self, painter, option, item, lx, top, mid, bot, text_x, text_pen, selected):
-        rect = option.rect
+    def _paint_file(self, painter, option, item, g: _RowGeom):
+        rect = g.rect
         # 提交的分支线继续穿过文件行（只画“下半格”各条线的终点那一列，竖直线）
         seen = set()
         for _a, b, color in item.parent.graph.bottom:
             if b in seen:
                 continue
             seen.add(b)
-            painter.setPen(QPen(theme.lane_color(color), self._pen_w()))
-            painter.drawLine(QPointF(lx(b), top), QPointF(lx(b), bot))
+            painter.setPen(QPen(theme.lane_color(color), g.pen_w))
+            painter.drawLine(QPointF(g.lx(b), g.top), QPointF(g.lx(b), g.bot))
 
         font = QFont(option.font)
         painter.setFont(font)
         fm = painter.fontMetrics()
         f = item.file
-        x = text_x + FILE_INDENT
-        base = mid + (fm.ascent() - fm.descent()) / 2.0
+        x = g.text_x + FILE_INDENT
+        base = g.mid + (fm.ascent() - fm.descent()) / 2.0
 
         # 小文件图标
-        painter.setPen(QPen(QColor("#9a9a9a") if not selected else QColor("#dddddd"), 1.2))
+        painter.setPen(QPen(QColor(theme.FILE_ICON_SELECTED if g.selected else theme.FILE_ICON), 1.2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(QRectF(x - 17, mid - 6.5, 10, 13), 1.5, 1.5)
-        painter.drawLine(QPointF(x - 15, mid - 1.5), QPointF(x - 9, mid - 1.5))
-        painter.drawLine(QPointF(x - 15, mid + 2.5), QPointF(x - 9, mid + 2.5))
+        painter.drawRoundedRect(QRectF(x - 17, g.mid - 6.5, 10, 13), 1.5, 1.5)
+        painter.drawLine(QPointF(x - 15, g.mid - 1.5), QPointF(x - 9, g.mid - 1.5))
+        painter.drawLine(QPointF(x - 15, g.mid + 2.5), QPointF(x - 9, g.mid + 2.5))
 
         letter = f.status
         letter_w = fm.horizontalAdvance(letter)
@@ -232,7 +243,7 @@ class CommitDelegate(QStyledItemDelegate):
         directory, _, name = f.path.rpartition("/")
         avail = max(0, int(right_limit - x))
         name_el = fm.elidedText(name, Qt.TextElideMode.ElideMiddle, avail)
-        painter.setPen(text_pen)
+        painter.setPen(g.text_pen)
         painter.drawText(QPointF(x, base), name_el)
         used = fm.horizontalAdvance(name_el)
         if directory and avail - used > 40:
@@ -241,40 +252,39 @@ class CommitDelegate(QStyledItemDelegate):
                 small.setPointSizeF(max(7.0, option.font.pointSizeF() - 1))
             painter.setFont(small)
             sfm = painter.fontMetrics()
-            painter.setPen(QColor("#bbbbbb") if selected else QColor("#808080"))
+            painter.setPen(QColor(theme.TEXT_HEADER if g.selected else theme.TEXT_FAINT))
             painter.drawText(QPointF(x + used + 8, base),
                              sfm.elidedText(directory, Qt.TextElideMode.ElideMiddle, avail - used - 8))
             painter.setFont(font)
         bold = QFont(option.font)
         bold.setBold(True)
         painter.setFont(bold)
-        painter.setPen(QColor(STATUS_COLORS.get(letter, "#d4d4d4")))
+        painter.setPen(QColor(theme.status_color(letter)))
         painter.drawText(QPointF(rect.right() - 14 - letter_w, base), letter)
 
     # ------------------------------------------------------------ 提交行
-    def _paint_commit(self, painter, option, row, model, lx, top, mid, bot, text_x, text_pen, selected, bg):
-        rect = option.rect
-        g = row.graph
-        for a, b, color in g.top:
-            painter.setPen(QPen(theme.lane_color(color), self._pen_w()))
-            painter.drawLine(QPointF(lx(a), top), QPointF(lx(b), mid))
-        for a, b, color in g.bottom:
-            painter.setPen(QPen(theme.lane_color(color), self._pen_w()))
-            painter.drawLine(QPointF(lx(a), mid), QPointF(lx(b), bot))
+    def _paint_commit(self, painter, option, row, model, g: _RowGeom):
+        rect, mid = g.rect, g.mid
+        gr = row.graph
+        for a, b, color in gr.top:
+            painter.setPen(QPen(theme.lane_color(color), g.pen_w))
+            painter.drawLine(QPointF(g.lx(a), g.top), QPointF(g.lx(b), mid))
+        for a, b, color in gr.bottom:
+            painter.setPen(QPen(theme.lane_color(color), g.pen_w))
+            painter.drawLine(QPointF(g.lx(a), mid), QPointF(g.lx(b), g.bot))
 
-        cx = lx(g.col)
-        node_color = theme.lane_color(g.color)
+        cx = g.lx(gr.col)
+        node_color = theme.lane_color(gr.color)
         is_head = row.commit.oid == model.head_oid
         if is_head:        # 当前位置：空心圆
             painter.setPen(QPen(node_color, 2))
-            painter.setBrush(QBrush(bg))
-            r = min(5.5, self._lw / 2.0 + 0.5)
-            painter.drawEllipse(QPointF(cx, mid), r, r)
+            painter.setBrush(QBrush(g.bg))
+            r = min(5.5, g.lane_w / 2.0 + 0.5)
         else:
-            painter.setPen(QPen(bg, 1))
+            painter.setPen(QPen(g.bg, 1))
             painter.setBrush(QBrush(node_color))
-            r = min(4.5, self._lw / 2.0 - 0.5)
-            painter.drawEllipse(QPointF(cx, mid), r, r)
+            r = min(4.5, g.lane_w / 2.0 - 0.5)
+        painter.drawEllipse(QPointF(cx, mid), r, r)
 
         # ---------- 右侧：引用标签 ----------
         pill_font = QFont(option.font)
@@ -286,27 +296,28 @@ class CommitDelegate(QStyledItemDelegate):
         pfm = painter.fontMetrics()
 
         pills = []
-        for r in row.commit.refs:
-            if r.kind == "remote":
-                label, color = "☁ " + r.name, theme.REF_REMOTE
-            elif r.kind == "tag":
-                label, color = r.name, theme.REF_TAG
-            elif r.kind == "head":
+        for ref in row.commit.refs:
+            if ref.kind == "remote":
+                label, color = "☁ " + ref.name, theme.REF_REMOTE
+            elif ref.kind == "tag":
+                label, color = ref.name, theme.REF_TAG
+            elif ref.kind == "head":
                 label, color = "HEAD", theme.REF_HEAD
-            elif r.is_head:
-                label, color = "◎ " + r.name, theme.REF_HEAD
+            elif ref.is_head:
+                label, color = "◎ " + ref.name, theme.REF_HEAD
             else:
-                label, color = r.name, theme.REF_LOCAL
+                label, color = ref.name, theme.REF_LOCAL
             label = pfm.elidedText(label, Qt.TextElideMode.ElideMiddle, 150)
             pills.append((label, color, pfm.horizontalAdvance(label) + 12))
 
         max_w = rect.width() * 0.6
-        shown, used = [], 0
+        shown: list[tuple[str, QColor, int]] = []
+        used = 0
         for label, color, w in pills:
             if used + w > max_w and shown:
                 extra = len(pills) - len(shown)
                 ew = pfm.horizontalAdvance(f"+{extra}") + 12
-                shown.append((f"+{extra}", QColor("#555555"), ew))
+                shown.append((f"+{extra}", theme.REF_MORE, ew))
                 used += ew + 4
                 break
             shown.append((label, color, w))
@@ -319,7 +330,7 @@ class CommitDelegate(QStyledItemDelegate):
         for label, color, w in shown:
             painter.setBrush(QBrush(color))
             painter.drawRoundedRect(QRectF(x, py, w, ph), 3, 3)
-            painter.setPen(QColor("#ffffff"))
+            painter.setPen(QColor(theme.TEXT_BRIGHT))
             painter.drawText(QPointF(x + 6, py + 2 + pfm.ascent()), label)
             painter.setPen(Qt.PenStyle.NoPen)
             x += w + 4
@@ -330,10 +341,10 @@ class CommitDelegate(QStyledItemDelegate):
         font.setBold(is_head)
         painter.setFont(font)
         fm = painter.fontMetrics()
-        avail = max(0, int(pills_left - text_x - 6))
+        avail = max(0, int(pills_left - g.text_x - 6))
         text = fm.elidedText(row.commit.subject, Qt.TextElideMode.ElideRight, avail)
-        painter.setPen(text_pen)
-        painter.drawText(QPointF(text_x, mid + (fm.ascent() - fm.descent()) / 2.0), text)
+        painter.setPen(g.text_pen)
+        painter.drawText(QPointF(g.text_x, mid + (fm.ascent() - fm.descent()) / 2.0), text)
 
 
 class GraphView(QListView):

@@ -1,12 +1,14 @@
-"""与界面库无关的小工具。"""
-import time
-from datetime import datetime
+"""与界面库无关的小工具：时间格式、有上限的缓存。"""
+from __future__ import annotations
 
-# 文件状态字母的颜色
-STATUS_COLORS = {
-    "M": "#e2c08d", "A": "#73c991", "D": "#f14c4c", "R": "#4fc1ff",
-    "U": "#73c991", "C": "#ff8800", "T": "#e2c08d",
-}
+import time
+from collections import OrderedDict
+from collections.abc import Container, Hashable
+from datetime import datetime
+from typing import Generic, TypeVar
+
+K = TypeVar("K", bound=Hashable)
+V = TypeVar("V")
 
 
 def fmt_time(ts: float) -> str:
@@ -24,3 +26,39 @@ def ago(ts: float) -> str:
     if d < 86400 * 60:
         return f"{int(d // 86400)} 天前"
     return fmt_time(ts)
+
+
+class LruCache(Generic[K, V]):
+    """最多保存 max_size 项的缓存，超出时丢掉最久没用过的。
+
+    put() 可以传入 keep：这些键无论多久没用都不会被丢掉（比如正展开着的提交）。
+    """
+
+    def __init__(self, max_size: int) -> None:
+        self.max_size = max_size
+        self._data: OrderedDict[K, V] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._data
+
+    def get(self, key: K) -> V | None:
+        """取出一项（并把它标记为“刚用过”）；没有返回 None。"""
+        if key not in self._data:
+            return None
+        self._data.move_to_end(key)
+        return self._data[key]
+
+    def peek(self, key: K) -> V | None:
+        """取出一项，但不改变它的新旧顺序。"""
+        return self._data.get(key)
+
+    def put(self, key: K, value: V, keep: Container[K] = ()) -> None:
+        self._data[key] = value
+        self._data.move_to_end(key)
+        extra = len(self._data) - self.max_size
+        if extra > 0:
+            for k in [k for k in self._data if k not in keep and k != key][:extra]:
+                del self._data[k]

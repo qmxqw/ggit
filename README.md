@@ -9,7 +9,7 @@
 
 ## 运行
 
-需要：Python 3.9+，已安装 Git 且 `git` 在 PATH 中。
+需要：Python 3.10+（PySide6 6.11 的要求），已安装 Git 且 `git` 在 PATH 中。
 
 ```bat
 pip install -r requirements.txt
@@ -72,6 +72,7 @@ python -m ggit
   超过 5000 个时只列出按路径排序后的前 5000 个，标题上会写明总数。
 - **搜索文件（`Ctrl+F`）**：只列出 Git 管理的文件；file 模式下再加上未被 `.gitignore` 忽略的新文件，
   `node_modules`、`build` 这类被忽略的目录不会出现在列表里（文件树里照样可以浏览）。
+  多个关键字用空格分开；最多列出 300 条，匹配更多时下方会提示总数，再输入一些关键字就能缩小范围。
 - **分支很多时**：提交图的分支线超过 10 条会自动压窄列宽，每条线仍然单独占一列；超过 28 条才挤在最右一列。
 - **diff 两种模式**
   - 上下合并：只显示改动处及前后 3 行，红底 = 删除，绿底 = 新增。
@@ -110,38 +111,65 @@ python tools/make_icon.py
 
 输出 `ggit/assets/ggit.ico`（多尺寸）、`ggit/assets/ggit.png` 和内嵌用的 `ggit/icon_data.py`。
 
-## 测试
-
-核心层（`gitcore`、`cancel`、`graph`、`difftools`、`items`、`fileutil`）不依赖界面库，用真实的临时 Git 仓库做测试；
-界面层的测试用 Qt 的 offscreen 平台运行，读写的是临时配置文件，不会碰到 `%APPDATA%\ggit\config.json`：
+## 开发：测试与代码检查
 
 ```bat
-python -m unittest discover -s tests -v
+pip install -r requirements-dev.txt
+python tools/check.py
 ```
+
+`tools/check.py` 依次运行三项检查，全部通过才算通过：
+
+- **ruff**：代码风格和常见隐患（规则见 `pyproject.toml`）
+- **mypy**：类型检查；核心层（`gitcore`、`cancel`、`graph`、`difftools`、`items`、`fileutil`、`config`、
+  `options`、`utils`）要求每个函数都写类型注解
+- **pytest**：核心层用真实的临时 Git 仓库测试；界面层的测试在 Qt 的 offscreen 平台上运行真实的窗口，
+  只通过公开接口操作和检查。测试不会在桌面上弹出窗口、托盘图标或通知，不注册全局热键，
+  读写的是临时配置文件，不会碰到 `%APPDATA%\ggit\config.json`
+
+只想跑测试：`python -m pytest`（或不装 pytest：`python -m unittest discover -s tests`）。
+
+`.github/workflows/ci.yml` 是 GitHub Actions 配置：推到 GitHub 后，每次推送都会在 Windows 上
+用 Python 3.10（支持的最低版本）和 3.12 各跑一遍 `python tools/check.py`。
 
 ## 目录结构
 
 ```
 ggit/
-  gitcore.py      调用 git、解码（UTF-8/GBK）、解析 status / log / diff / 文件历史 / 分支列表
-  fileutil.py     file 模式：读取文本文件做预览
-  graph.py        提交图的分支线布局算法
-  difftools.py    diff 加工：裁剪成“只看改动处”、左右对照对齐、改动分段
-  items.py        提交图列表条目（提交行 + 展开的文件行）
-  ui_main.py      主窗口：顶部项目导航、热键、菜单、托盘、全局热键
-  ui_nav.py       顶部 200 宽的项目大标签（可拖动排序）
-  ui_project.py   单个项目的页面：状态行、更改、提交图、文档标签页
-  ui_docs.py      文档标签页（每个文件一个标签，切换 / 关闭）
-  ui_files.py     file 模式：文件树、文件预览
-  ui_diff.py      diff 视图（两种模式、加宽滚动条与色块、改动跳转）
-  ui_graph.py     提交图列表（模型 + 自绘）
-  ui_dialogs.py   快速选择对话框
-  winhotkey.py    Windows 全局热键与“置顶显示”
+  —— 核心层（不依赖界面库）——
+  gitcore.py         调用 git、解码（UTF-8/GBK）、解析 status / log / diff / 文件历史 / 分支列表
+  cancel.py          取消后台 git 任务（gitcore 用它结束正在运行的子进程）
+  graph.py           提交图的分支线布局算法
+  difftools.py       diff 加工：裁剪成“只看改动处”、左右对照对齐、改动分段
+  items.py           提交图列表条目（提交行 + 展开的文件行）
+  fileutil.py        file 模式：读取文本文件做预览
+  config.py          配置文件读写
+  options.py         显示选项、字号范围
+  utils.py           时间格式、有上限的缓存（LruCache）
+  —— 界面层 ——
+  ui_main.py         主窗口：顶部项目导航、菜单、托盘、全局热键、字体缩放
+  ui_nav.py          顶部 200 宽的项目大标签（可拖动排序）
+  ui_project.py      单个项目的页面：组装下面这些面板，负责刷新和它们之间的联动
+  ui_status.py         左上角的状态行（分支按钮、同步徽标、上游与 fetch 时间）
+  ui_branches.py       分支下拉列表（Ctrl+B）
+  ui_changes.py        “更改”面板（未提交的文件）
+  ui_graph_panel.py    “图形”面板：显示范围、分页加载、展开 / 收起提交
+  ui_history.py        “文件历史”面板
+  ui_graph.py        提交图列表（模型 + 自绘）
+  ui_docs.py         文档标签页（每个文件一个标签，切换 / 关闭），以及文档视图的接口 DocView
+  ui_diff.py         diff 视图（两种模式、加宽滚动条与色块、改动跳转）
+  ui_files.py        file 模式：文件树、文件预览
+  ui_dialogs.py      快速选择对话框（Ctrl+P / Ctrl+F）
+  ui_common.py       各面板共用的小部件和 HTML 片段
+  theme.py           深色主题：全部颜色和样式表（按控件 objectName 匹配）
+  async_runner.py    后台线程执行 git，结果回到界面线程
+  winhotkey.py       Windows 全局热键与“置顶显示”
   icon.py / icon_data.py   程序图标（内嵌）
-  async_runner.py 后台线程执行 git，结果回到界面线程
-  cancel.py       取消后台 git 任务（不依赖界面库，gitcore 用它结束子进程）
-  theme.py        深色主题、颜色，以及全部界面样式表（按控件 objectName 匹配）
-  config.py / options.py / utils.py
-tools/make_icon.py
+tools/
+  check.py           一条命令跑完 ruff + mypy + pytest
+  make_icon.py       重新生成图标
 tests/
+  support.py         测试共用：offscreen 平台、临时配置文件、临时 Git 仓库、等待后台任务
+pyproject.toml       ruff / mypy / pytest 的配置
+requirements.txt     运行依赖；requirements-dev.txt：开发依赖
 ```

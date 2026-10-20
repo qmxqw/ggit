@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QTimer
 from PySide6.QtWidgets import QApplication
@@ -34,7 +35,7 @@ if IS_WIN:
 
 
 class _Filter(QAbstractNativeEventFilter):
-    def __init__(self, hotkey_id: int, callback):
+    def __init__(self, hotkey_id: int, callback: Callable[[], None]) -> None:
         super().__init__()
         self._id = hotkey_id
         self._callback = callback
@@ -54,21 +55,23 @@ class _Filter(QAbstractNativeEventFilter):
 class GlobalHotkey:
     """全局热键。register() 成功后，无论 ggit 是否在前台，按键都会调用 callback。"""
 
-    def __init__(self, callback, vk: int = ord("G"), modifiers: int = MOD_ALT, hotkey_id: int = 0x6767):
+    def __init__(self, callback: Callable[[], None], vk: int = ord("G"), modifiers: int = MOD_ALT,
+                 hotkey_id: int = 0x6767) -> None:
         self._callback = callback
         self._vk = vk
         self._mods = modifiers
         self._id = hotkey_id
-        self._filter = None
+        self._filter: _Filter | None = None
         self.registered = False
 
     def register(self) -> bool:
-        if not IS_WIN or self.registered:
+        app = QApplication.instance()
+        if not IS_WIN or self.registered or app is None:
             return self.registered
         if not _user32.RegisterHotKey(None, self._id, self._mods | MOD_NOREPEAT, self._vk):
             return False        # 多半是被别的程序占用了
         self._filter = _Filter(self._id, self._callback)
-        QApplication.instance().installNativeEventFilter(self._filter)
+        app.installNativeEventFilter(self._filter)
         self.registered = True
         return True
 
@@ -76,9 +79,10 @@ class GlobalHotkey:
         if not self.registered:
             return
         _user32.UnregisterHotKey(None, self._id)
-        if self._filter is not None:
-            QApplication.instance().removeNativeEventFilter(self._filter)
-            self._filter = None
+        app = QApplication.instance()
+        if self._filter is not None and app is not None:
+            app.removeNativeEventFilter(self._filter)
+        self._filter = None
         self.registered = False
 
 

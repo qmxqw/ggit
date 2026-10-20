@@ -66,6 +66,6 @@ def read_text_file(path: str, encoding: str = ENC_AUTO) -> FileContent:
         raw_lines.pop()
     if fc.truncated and raw_lines:
         raw_lines.pop()                      # 最后一行很可能被截断了
-    fc.lines = [decode_line(l[:-1] if l.endswith(b"\r") else l, encoding) for l in raw_lines]
+    fc.lines = [decode_line(ln[:-1] if ln.endswith(b"\r") else ln, encoding) for ln in raw_lines]
     fc.encoding = _encoding_label(data, encoding)
     return fc

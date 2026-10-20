@@ -6,8 +6,8 @@
 """
 import base64
 import io
-import math
 import os
+import tempfile
 
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
@@ -52,7 +52,9 @@ def draw_icon(S=1024, detail=True, k=1.0):
     radius = int(S * 0.225)
     img, mask = background(S, radius)
     sc = S / 1024.0
-    P = lambda x, y: (x * sc, y * sc)
+
+    def P(x, y):                    # 1024 网格上的坐标 → 当前尺寸
+        return (x * sc, y * sc)
 
     # ---- 电路纹理（只在大尺寸画）----
     if detail:
@@ -79,7 +81,7 @@ def draw_icon(S=1024, detail=True, k=1.0):
     # 用“沿路径盖圆章”的方式画粗线：边缘平滑、两头是圆角（逐段画线会出现毛边）
     def stroke(points, colors, width):
         r = width / 2.0
-        for (x, y), c in zip(points, colors):
+        for (x, y), c in zip(points, colors, strict=True):
             g.ellipse((x - r, y - r, x + r, y + r), fill=(*c, 255))
 
     # 主干：上青下绿渐变
@@ -127,9 +129,9 @@ def draw_icon(S=1024, detail=True, k=1.0):
 
 def render(size):
     if size >= 96:
-        return draw_icon(1024, True, 1.0).resize((size, size), Image.LANCZOS)
+        return draw_icon(1024, True, 1.0).resize((size, size), Image.Resampling.LANCZOS)
     big = draw_icon(512, False, 1.45)          # 小尺寸：去掉细节、线条加粗
-    return big.resize((size, size), Image.LANCZOS)
+    return big.resize((size, size), Image.Resampling.LANCZOS)
 
 
 def main():
@@ -142,7 +144,8 @@ def main():
     imgs[256].save(os.path.join(assets, "ggit.ico"), format="ICO",
                    sizes=[(s, s) for s in sizes], append_images=[imgs[s] for s in sizes if s != 256])
     # 内嵌到代码里：避免打包成 exe 后找不到图片文件
-    out = ["# 由 tools/make_icon.py 自动生成，请不要手改。", '"""内嵌的程序图标（PNG，base64）。"""', "", "ICON_PNGS = {"]
+    out = ["# 由 tools/make_icon.py 自动生成，请不要手改。",
+           '"""内嵌的程序图标（PNG，base64）。"""', "", "ICON_PNGS = {"]
     for s in (256, 64, 32, 16):
         buf = io.BytesIO()
         imgs[s].save(buf, format="PNG", optimize=True)
@@ -160,8 +163,9 @@ def main():
     for s in (256, 128, 64, 48, 32, 24, 16):
         sheet.alpha_composite(imgs[s], (x, 8))
         x += s + 16
-    sheet.save("/tmp/ggit_icon_preview.png")
-    print("ok", os.path.getsize(os.path.join(assets, "ggit.ico")), "bytes ico")
+    preview = os.path.join(tempfile.gettempdir(), "ggit_icon_preview.png")
+    sheet.save(preview)
+    print("ok", os.path.getsize(os.path.join(assets, "ggit.ico")), "bytes ico; 预览图：", preview)
 
 
 if __name__ == "__main__":

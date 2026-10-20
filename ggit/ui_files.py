@@ -3,12 +3,24 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QDir, QSortFilterProxyModel, Qt, QTimer, Signal
+from PySide6.QtCore import QDir, QModelIndex, QObject, QPersistentModelIndex, QSortFilterProxyModel, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QAbstractItemView, QFileSystemModel, QFrame, QHBoxLayout, QLabel, QMenu, QSizePolicy,
-                               QStackedWidget, QTreeView, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFileSystemModel,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QSizePolicy,
+    QStackedWidget,
+    QTreeView,
+    QVBoxLayout,
+    QWidget,
+)
 
-from .ui_diff import MAX_ROWS, Blk, _CodeView
+from .ui_diff import MAX_ROWS, Blk, CodeView
+from .ui_docs import DocView
 
 
 def _fmt_size(n: int) -> str:
@@ -20,9 +32,8 @@ def _fmt_size(n: int) -> str:
 
 
 # ---------------------------------------------------------------- 文本 / 代码预览
-class FileDocument(QWidget):
+class FileDocument(DocView):
     """一个标签页里的文件预览：标题栏（路径、行数、大小、编码）+ 带行号的只读文本。"""
-    modeToggleRequested = Signal()      # 和 DiffDocument 保持同样的接口；文件预览没有 diff 模式，不会发出
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -52,7 +63,7 @@ class FileDocument(QWidget):
         self.msg_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.msg_label.setWordWrap(True)
         self.msg_label.setObjectName("placeholder")
-        self.view = _CodeView(1, False)
+        self.view = CodeView(1)
         self.stack.addWidget(self.msg_label)    # 0
         self.stack.addWidget(self.view)         # 1
         lay.addWidget(self.stack, 1)
@@ -133,9 +144,13 @@ class FileDocument(QWidget):
 class _HideGitFilter(QSortFilterProxyModel):
     """文件树里不显示 .git 目录（其它以点开头的文件，比如 .gitignore，照常显示）。"""
 
-    def filterAcceptsRow(self, row, parent):
-        src = self.sourceModel()
-        return src.fileName(src.index(row, 0, parent)) != ".git"
+    def __init__(self, fs: QFileSystemModel, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._fs = fs
+        self.setSourceModel(fs)
+
+    def filterAcceptsRow(self, row: int, parent: QModelIndex | QPersistentModelIndex) -> bool:
+        return self._fs.fileName(self._fs.index(row, 0, parent)) != ".git"
 
 
 class FileTreePanel(QWidget):
@@ -166,8 +181,7 @@ class FileTreePanel(QWidget):
         self.fs.setReadOnly(True)
         self.fs.setFilter(QDir.Filter.AllEntries | QDir.Filter.NoDotAndDotDot | QDir.Filter.Hidden)
         self.fs.setRootPath(self.root)
-        self.proxy = _HideGitFilter(self)
-        self.proxy.setSourceModel(self.fs)
+        self.proxy = _HideGitFilter(self.fs, self)
 
         self.tree = QTreeView()
         self.tree.setModel(self.proxy)
