@@ -77,6 +77,7 @@ class BranchMenu(QMenu):
 
     def _apply_style(self) -> None:
         base = QApplication.font()
+        self.setFont(theme.with_icon_font(base))    # 远端分支前面的云朵图标
         base_size = base.pointSizeF() if base.pointSizeF() > 0 else float(base.pointSize())
         # 字号比常规大 25%，行高与内边距宽阔，方便点选
         self.setStyleSheet(theme.branch_menu_css(max(12, round(base_size * 1.25)),
@@ -147,5 +148,5 @@ class BranchMenu(QMenu):
         if remote:
             self._add_title("── 远端分支 ──")
             for b in remote:
-                text = f"☁  {b.name}" + (f"  ({ago(b.time)})" if b.time else "")
+                text = f"{theme.CLOUD}  {b.name}" + (f"  ({ago(b.time)})" if b.time else "")
                 self._add_choice(text, b.ref, self._scope == "ref:" + b.ref, b)

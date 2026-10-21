@@ -13,6 +13,8 @@ from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QWidget
 
+from . import theme
+
 
 class PickerDialog(QDialog):
     MAX_SHOWN = 300     # 只显示前这么多条匹配项
@@ -33,6 +35,7 @@ class PickerDialog(QDialog):
         self.edit.setPlaceholderText(placeholder)
         lay.addWidget(self.edit)
         self.list = QListWidget()
+        self.list.setFont(theme.with_icon_font(self.list.font()))     # 分支前面的云朵图标
         lay.addWidget(self.list, 1)
         self.hint = QLabel()
         self.hint.setObjectName("pickerHint")

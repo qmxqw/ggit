@@ -340,8 +340,8 @@ class GitOps(QObject):
         if not branches:
             self._fail(title, "没有可选的分支（分支列表还在加载时请稍后再试）")
             return
-        items = [(("☁ " if b.kind == "remote" else "⎇ ") + b.name + (f"    {b.subject}" if b.subject else ""), b)
-                 for b in branches]
+        items = [((f"{theme.CLOUD} " if b.kind == "remote" else "⎇ ") + b.name
+                  + (f"    {b.subject}" if b.subject else ""), b) for b in branches]
         chosen = self.pick(self.widget, title, items)
         if isinstance(chosen, BranchInfo):
             action(chosen)

@@ -21,13 +21,15 @@ BAR_BG = "#2d2d30"          # 标题栏、工具条
 PANEL_BG = "#252528"        # 状态行、说明栏
 BORDER = "#38383c"
 EDITOR_BORDER = "#3c3c3c"
-TEXT = "#d4d4d4"
+TEXT = "#cccccc"            # 和 VS Code 一样不用接近纯白的字，看久了不刺眼
 TEXT_BRIGHT = "#ffffff"
 TEXT_HEADER = "#bbbbbb"     # 区块标题
 TEXT_MUTED = "#8a8a8a"      # 提示文字、次要信息
 TEXT_DIM = "#9a9a9a"
 TEXT_FAINT = "#808080"
 ACCENT = "#0e7ad1"
+SELECTION = "#04395e"           # 选中行：深一点的蓝，不像亮蓝那样一直晃眼
+SELECTION_INACTIVE = "#37373d"  # 窗口不在前台时的选中行：灰色
 
 # ---------------------------------------------------------------- 语义色
 ADDED = "#73c991"           # 新增 / 领先 / 已同步
@@ -50,6 +52,23 @@ def status_color(letter: str) -> str:
     return STATUS_COLORS.get(letter, TEXT)
 
 
+# ---------------------------------------------------------------- 悬停提示
+# 照 VS Code 的悬停框：深底细边框；全部常规字重，层次靠颜色和留白，不加粗、不用纯白
+TIP_BG = "#252526"
+TIP_BORDER = "#454545"      # 边框，也是提示框里的分隔线
+TIP_TEXT = TEXT             # 正文
+TIP_TITLE = "#e6e6e6"       # 提交标题：只比正文亮一点
+TIP_TEXT_DIM = "#9d9d9d"    # 次要信息：提交时间、尾注（Co-Authored-By 等）、项目符号、截断提示
+TIP_LINK = "#4daafc"        # 作者、提交 id、邮箱
+TIP_CODE = "#d7ba7d"        # 正文里 `反引号` 括起来的代码
+
+
+def mix(a: QColor, b: QColor, t: float) -> QColor:
+    """两种颜色按比例混合：t=0 是 a，t=1 是 b。"""
+    return QColor(round(a.red() + (b.red() - a.red()) * t), round(a.green() + (b.green() - a.green()) * t),
+                  round(a.blue() + (b.blue() - a.blue()) * t))
+
+
 # ---------------------------------------------------------------- 顶部项目标签
 NAV_BG = BAR_BG
 NAV_BG_HOVER = "#3a3a40"
@@ -64,11 +83,34 @@ LANE_COLORS = ["#4fc1ff", "#c586c0", "#dcdcaa", "#4ec9b0",
 ROW_HOVER = QColor(255, 255, 255, 20)
 FILE_ICON = TEXT_DIM
 FILE_ICON_SELECTED = "#dddddd"
-REF_HEAD = QColor("#1f6feb")
-REF_LOCAL = QColor("#0e639c")
-REF_REMOTE = QColor("#6f42c1")
-REF_TAG = QColor("#7d6b1e")
-REF_MORE = QColor("#555555")    # “+3” 这种放不下的引用
+
+# 引用标签（提交行右侧、悬停提示底部）：提亮的同色字 + 淡淡的同色底；
+# 不用饱和的实心底配加粗白字，每一行都在抢眼睛
+REF_BRANCH = QColor("#59a4f9")  # 本地分支、分离的 HEAD（当前分支底色更实一点）
+REF_REMOTE = QColor("#b180d7")
+REF_TAG = QColor("#d7ba7d")
+REF_MORE = QColor("#9d9d9d")    # “+3” 这种放不下的引用
+
+
+# 远端分支的图标：Windows 10 起自带的线条图标字体里的云朵（提交图、悬停提示、分支菜单、分支选择框共用）。
+# 不用 ☁ 字符：它是从符号字体借来的实心大团，和细字放在一起很难看
+ICON_FONT = "Segoe MDL2 Assets"
+CLOUD = ""
+
+
+def with_icon_font(font: QFont) -> QFont:
+    """把图标字体补在字体后面当后备：图标（私用区字符）用它画，其它字符不受影响。"""
+    f = QFont(font)
+    f.setFamilies([*font.families(), ICON_FONT])
+    return f
+
+
+def ref_chip(color: QColor, current: bool = False) -> tuple[QColor, QColor, QColor]:
+    """引用标签的 (文字, 底色, 边框)：底色和边框是半透明的同色；current：当前分支。"""
+    fill, border = QColor(color), QColor(color)
+    fill.setAlphaF(0.3 if current else 0.16)
+    border.setAlphaF(0.6 if current else 0.35)
+    return mix(color, QColor("#ffffff"), 0.35), fill, border
 
 # ---------------------------------------------------------------- diff
 DEL_BG = QColor(94, 33, 33)
@@ -99,7 +141,10 @@ def lane_color(i: int) -> QColor:
 
 # ---------------------------------------------------------------- 样式表
 _STYLE = Template("""
-QToolTip { color: $TEXT; background: #3c3c3c; border: 1px solid #555; }
+/* 悬停提示。Qt 还会把“边框 + 左内边距”再加一遍当作文字四周的留白，所以实际留白比这里写的大 */
+QToolTip { color: $TIP_TEXT; background: $TIP_BG; border: 1px solid $TIP_BORDER; padding: 2px 4px; }
+/* 提交图的悬停提示（自己做的提示框，贴在正文区左侧） */
+QLabel#commitTip { color: $TIP_TEXT; background: $TIP_BG; border: 1px solid $TIP_BORDER; padding: 8px 10px; }
 QTabBar::tab {
     padding: 6px 14px; margin-right: 2px;
     background: $BAR_BG; color: #b0b0b0;
@@ -175,6 +220,7 @@ def stylesheet(font_pt: int = FONT_DEFAULT) -> str:
         TEXT=TEXT, TEXT_BRIGHT=TEXT_BRIGHT, TEXT_HEADER=TEXT_HEADER, TEXT_MUTED=TEXT_MUTED,
         TEXT_DIM=TEXT_DIM, BAR_BG=BAR_BG, PANEL_BG=PANEL_BG, WINDOW_BG=WINDOW_BG, EDITOR_BG=EDITOR_BG,
         BORDER=BORDER, EDITOR_BORDER=EDITOR_BORDER, ACCENT=ACCENT, REF_TEXT=REF_TEXT,
+        TIP_BG=TIP_BG, TIP_BORDER=TIP_BORDER, TIP_TEXT=TIP_TEXT,
         PLACEHOLDER_PT=font_pt + 1, EMPTY_PAGE_PT=font_pt + 2)
 
 
@@ -211,10 +257,12 @@ def apply_dark_theme(app: QApplication, font_pt: int = FONT_DEFAULT) -> None:
     p.setColor(R.Text, QColor(TEXT))
     p.setColor(R.Button, QColor("#333337"))
     p.setColor(R.ButtonText, QColor(TEXT))
-    p.setColor(R.Highlight, QColor("#094771"))
+    p.setColor(R.Highlight, QColor(SELECTION))
     p.setColor(R.HighlightedText, QColor(TEXT_BRIGHT))
-    p.setColor(R.ToolTipBase, QColor("#3c3c3c"))
-    p.setColor(R.ToolTipText, QColor(TEXT))
+    p.setColor(G.Inactive, R.Highlight, QColor(SELECTION_INACTIVE))
+    p.setColor(G.Inactive, R.HighlightedText, QColor(TEXT))
+    p.setColor(R.ToolTipBase, QColor(TIP_BG))
+    p.setColor(R.ToolTipText, QColor(TIP_TEXT))
     p.setColor(R.PlaceholderText, QColor(TEXT_FAINT))
     p.setColor(R.Link, QColor(RENAMED))
     for role in (R.Text, R.WindowText, R.ButtonText):
